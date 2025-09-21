@@ -13,7 +13,7 @@
     The environment name for the deployment (defaults to "dev")
 
 .PARAMETER Location
-    The Azure region for deployment (defaults to "canadacentral")
+    The Azure region for deployment (defaults to "westus2")
 
 .PARAMETER ResourceGroup
     The target resource group name (defaults to "rg-rg-et-trivia-dev")
@@ -30,14 +30,14 @@
     Shows what will be deployed without making changes
 
 .EXAMPLE
-    .\deploy-to-azure.ps1 -EnvironmentName "prod" -Location "eastus"
+    .\deploy-to-azure.ps1 -EnvironmentName "prod" -Location "westus2"
     Deploys to production environment in East US
 #>
 
 param(
     [string]$EnvironmentName = "dev",
-    [string]$Location = "canadacentral",
-    [string]$ResourceGroup = "rg-rg-et-trivia-dev",
+    [string]$Location = "westus2",  # Must be westus2 to match existing resource group
+    [string]$ResourceGroup = "rg-rg-et-trivia-dev",  # Existing resource group in westus2
     [switch]$Preview
 )
 
@@ -104,6 +104,12 @@ try {
         az login
         $account = az account show --output json | ConvertFrom-Json
         Write-Success "Successfully logged into Azure as: $($account.user.name)"
+    }
+    
+    # Validate location for existing resource group
+    if ($ResourceGroup -eq "rg-rg-et-trivia-dev" -and $Location -ne "westus2") {
+        Write-Error "The resource group '$ResourceGroup' exists in 'westus2'. Please use -Location 'westus2' or choose a different resource group name."
+        exit 1
     }
     
     # Set environment variables

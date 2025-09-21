@@ -42,14 +42,14 @@ If you prefer to run commands manually:
 ```bash
 # Set environment variables
 $env:AZURE_ENV_NAME = "dev"
-$env:AZURE_LOCATION = "canadacentral"
+$env:AZURE_LOCATION = "westus2"
 
 # Build the application
 npm install
 npm run build
 
 # Deploy to Azure
-azd init --environment dev --location canadacentral
+azd init --environment dev --location westus2
 azd up --environment dev
 ```
 
