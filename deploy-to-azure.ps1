@@ -131,6 +131,18 @@ try {
         Write-Success "AZD environment already exists"
     }
     
+    # Refresh azd environment to sync with Azure
+    Write-Header "Refreshing Azure Developer CLI Environment"
+    Write-Host "Synchronizing local environment with Azure deployment state..."
+    try {
+        azd env refresh
+        Write-Success "AZD environment refreshed and synchronized with Azure"
+    }
+    catch {
+        Write-Warning "Could not refresh azd environment. This may be normal for new deployments."
+        Write-Host "Continuing with deployment..."
+    }
+    
     # Build the application
     Write-Header "Building Application"
     Write-Host "Installing dependencies..."
