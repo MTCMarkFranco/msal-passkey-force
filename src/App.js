@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
 
 /**
@@ -32,32 +32,47 @@ function App() {
   const [user, setUser] = useState(null);
   const [authData, setAuthData] = useState(null);
   const [error, setError] = useState(null);
+  const [isAuthStarting, setIsAuthStarting] = useState(false); // Prevent multiple auth starts
 
   // App State
   const [count, setCount] = useState(0);
   const [message, setMessage] = useState('Welcome to Secure Kiosk!');
   const [userProfile, setUserProfile] = useState(null);
 
-  // Auto-start authentication on component mount
+  // Auto-start authentication on component mount (with safeguards against multiple calls)
   useEffect(() => {
-    console.log('🔐 App initialized - Auto-starting authentication...');
-    startAuthentication();
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔐 App initialized - Checking if authentication should start...');
+    }
+    
+    // Only start authentication if not already started and not in progress
+    if (authState === 'initializing' && !isAuthStarting && !sessionId) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔐 Starting authentication...');
+      }
+      startAuthentication();
+    } else if (process.env.NODE_ENV === 'development') {
+      console.log('🔐 Authentication already started or in progress, skipping...');
+    }
   }, []); // Empty dependency array means this runs once when component mounts
 
   // Only retry on specific authentication errors, not connection errors
   useEffect(() => {
     let retryTimeout;
     
-    // Only retry for authentication-specific errors, not after successful auth
-    if (authState === 'error' && error && 
-        (error.includes('expired') || error.includes('Authentication failed') || error.includes('AADSTS'))) {
-      console.log('⚠️ Authentication error detected - Will retry in 5 seconds...', error);
+    // Only retry for expired sessions, not other auth failures to avoid loops
+    if (authState === 'error' && error && error.includes('expired')) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('⚠️ Session expired - Will retry in 5 seconds...', error);
+      }
       retryTimeout = setTimeout(() => {
-        console.log('🔄 Auto-retrying authentication due to auth error...');
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🔄 Auto-retrying authentication due to session expiry...');
+        }
         startAuthentication();
       }, 5000);
-    } else if (authState === 'error') {
-      console.log('❌ Connection or system error - No auto-retry:', error);
+    } else if (authState === 'error' && process.env.NODE_ENV === 'development') {
+      console.log('❌ Authentication error - Manual retry required:', error);
     }
 
     return () => {
@@ -72,39 +87,54 @@ function App() {
     let pollInterval;
 
     if (authState === 'authenticating' && sessionId) {
-      console.log('🔍 Starting authentication polling for session:', sessionId);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔍 Starting authentication polling for session:', sessionId);
+      }
       
       pollInterval = setInterval(async () => {
         try {
           const response = await api.get(`/auth/device-code/status/${sessionId}`);
           const { status, user: authUser, error: authError } = response.data;
 
-          console.log('📊 Poll result:', { status, sessionId });
+          if (process.env.NODE_ENV === 'development') {
+            console.log('📊 Poll result:', { status, sessionId });
+          }
 
           if (status === 'completed') {
-            console.log('✅ Authentication completed successfully!');
+            if (process.env.NODE_ENV === 'development') {
+              console.log('✅ Authentication completed successfully!');
+            }
             setAuthState('authenticated');
             setUser(authUser);
             clearInterval(pollInterval);
             
+            // Clear any existing errors
+            setError(null);
+            
             // Fetch user profile from Microsoft Graph
             fetchUserProfile();
           } else if (status === 'failed') {
-            console.log('❌ Authentication failed:', authError);
+            if (process.env.NODE_ENV === 'development') {
+              console.log('❌ Authentication failed:', authError);
+            }
             setAuthState('error');
-            setError(authError || 'Authentication failed');
+            setError(authError || 'Authentication failed - please try again manually');
             clearInterval(pollInterval);
           } else if (status === 'expired') {
-            console.log('⏰ Authentication session expired');
+            if (process.env.NODE_ENV === 'development') {
+              console.log('⏰ Authentication session expired');
+            }
             setAuthState('error');
             setError('Authentication session expired. Please try again.');
             clearInterval(pollInterval);
-          } else if (status === 'pending') {
+          } else if (status === 'pending' && process.env.NODE_ENV === 'development') {
             console.log('⏳ Still waiting for user authentication...');
             // Continue polling
           }
         } catch (err) {
-          console.error('❌ Polling error:', err);
+          if (process.env.NODE_ENV === 'development') {
+            console.error('❌ Polling error:', err);
+          }
           setError('Connection error during authentication');
           setAuthState('error');
           clearInterval(pollInterval);
@@ -115,19 +145,32 @@ function App() {
     // Cleanup function
     return () => {
       if (pollInterval) {
-        console.log('🛑 Stopping authentication polling');
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🛑 Stopping authentication polling');
+        }
         clearInterval(pollInterval);
       }
     };
   }, [authState, sessionId]); // Dependencies: authState and sessionId
 
-  // Initialize authentication
+  // Initialize authentication with safeguards against multiple calls
   const startAuthentication = async () => {
+    // Prevent multiple simultaneous authentication attempts
+    if (isAuthStarting || authState === 'authenticating' || sessionId) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔐 Authentication already in progress, ignoring duplicate call');
+      }
+      return;
+    }
+
     try {
+      setIsAuthStarting(true);
       setAuthState('authenticating');
       setError(null);
       
-      console.log('🔐 Starting device code authentication...');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔐 Starting device code authentication...');
+      }
       
       const response = await api.post('/auth/device-code/start');
       const { sessionId: newSessionId, userCode, verificationUri, qrCode, message: authMessage, expiresIn } = response.data;
@@ -141,19 +184,34 @@ function App() {
         expiresIn
       });
 
-      console.log('📱 Device code generated:', { userCode, verificationUri });
+      if (process.env.NODE_ENV === 'development') {
+        console.log('📱 Device code generated:', { userCode, verificationUri });
+      }
       
     } catch (error) {
       console.error('Authentication initialization failed:', error);
       setAuthState('error');
       setError(error.response?.data?.message || 'Failed to initialize authentication');
+    } finally {
+      setIsAuthStarting(false);
     }
   };
 
   // Generate a new authentication code
   const generateNewCode = async () => {
-    console.log('🔄 Generating new authentication code...');
-    await startAuthentication();
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔄 Generating new authentication code...');
+    }
+    // Reset session state before starting new authentication
+    setSessionId(null);
+    setAuthData(null);
+    setAuthState('initializing');
+    setError(null);
+    
+    // Small delay to ensure state is reset
+    setTimeout(() => {
+      startAuthentication();
+    }, 100);
   };
 
   // Fetch user profile using Microsoft Graph API
@@ -171,10 +229,14 @@ function App() {
       });
 
       setUserProfile(profileResponse.data);
-      console.log('👤 User profile loaded:', profileResponse.data.displayName);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('👤 User profile loaded:', profileResponse.data.displayName);
+      }
       
     } catch (error) {
-      console.error('Failed to fetch user profile:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Failed to fetch user profile:', error);
+      }
       // Don't set error state - profile fetch failure shouldn't break the app
     }
   };
@@ -193,18 +255,21 @@ function App() {
       setUserProfile(null);
       setAuthData(null);
       setError(null);
+      setIsAuthStarting(false);
       setMessage('Welcome to Secure Kiosk!');
       setCount(0);
       
-      console.log('🔓 Logged out successfully - Auto-restarting authentication...');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔓 Logged out successfully - Ready for new authentication');
+      }
       
-      // Auto-restart authentication after logout
-      setTimeout(() => {
-        startAuthentication();
-      }, 1000);
+      // Don't auto-restart - let user manually authenticate if needed
+      // This prevents unwanted authentication loops
       
     } catch (error) {
-      console.error('Logout failed:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Logout failed:', error);
+      }
       // Force reset even if logout API fails
       setAuthState('initializing');
       setSessionId(null);
@@ -212,11 +277,9 @@ function App() {
       setUserProfile(null);
       setAuthData(null);
       setError(null);
-      
-      // Still restart authentication
-      setTimeout(() => {
-        startAuthentication();
-      }, 1000);
+      setIsAuthStarting(false);
+      setMessage('Welcome to Secure Kiosk!');
+      setCount(0);
     }
   };
 

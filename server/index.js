@@ -16,7 +16,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-const { PublicClientApplication, LogLevel } = require('@azure/msal-node');
+// MSAL no longer needed - using pure custom polling
 const QRCode = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
 
@@ -58,99 +58,99 @@ app.use(limiter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// MSAL Configuration - Following Azure Best Practices
-const msalConfig = {
-  auth: {
-    clientId: process.env.CLIENT_ID,
-    authority: `https://login.microsoftonline.com/${process.env.TENANT_ID}`,
-    clientSecret: process.env.CLIENT_SECRET, // For confidential client flows
-  },
-  system: {
-    loggerOptions: {
-      loggerCallback(loglevel, message, containsPii) {
-        if (!containsPii) {
-          console.log(`[MSAL] ${new Date().toISOString()} - ${message}`);
-        }
-      },
-      piiLoggingEnabled: false,
-      logLevel: process.env.NODE_ENV === 'development' ? LogLevel.Verbose : LogLevel.Warning,
-    }
-  }
-};
-
-// Initialize MSAL Public Client Application for Device Code Flow
-const pca = new PublicClientApplication(msalConfig);
+// Pure Custom Device Code Flow - No MSAL dependency
+// We make direct HTTP requests to Microsoft's OAuth endpoints for complete control
 
 // In-memory store for device code sessions (use Redis in production)
 const deviceCodeSessions = new Map();
 
+// Clean up expired sessions every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [sessionId, session] of deviceCodeSessions.entries()) {
+    const sessionAge = (now - session.timestamp) / 1000;
+    if (sessionAge > session.expiresIn + 300) { // Add 5 minute buffer
+      deviceCodeSessions.delete(sessionId);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`[CLEANUP] Removed ${cleaned} expired sessions`);
+  }
+}, 300000); // Run every 5 minutes
+
 /**
- * Device Code Authentication Flow for Kiosk
- * This implements the strongest security for kiosk scenarios where users cannot enter passwords
+ * Device Code Authentication Flow for Kiosk - Pure Custom Polling
+ * This implements the strongest security for kiosk scenarios without MSAL's internal polling
  */
 app.post('/auth/device-code/start', async (req, res) => {
   try {
     const sessionId = uuidv4();
     const scopes = process.env.DEFAULT_SCOPES?.split(',') || ['openid', 'profile', 'User.Read'];
 
-    console.log(`[AUTH] Starting device code flow for session: ${sessionId}`);
+    console.log(`[AUTH] Starting pure custom device code flow for session: ${sessionId}`);
 
-    const deviceCodeRequest = {
-      scopes: scopes,
-      deviceCodeCallback: (response) => {
-        console.log(`[DEVICE CODE] User code: ${response.userCode}`);
-        console.log(`[DEVICE CODE] Device code expires in: ${response.expiresIn} seconds`);
-        
-        // Store session data
-        deviceCodeSessions.set(sessionId, {
-          deviceCode: response.deviceCode,
-          userCode: response.userCode,
-          verificationUri: response.verificationUri,
-          expiresIn: response.expiresIn,
-          message: response.message,
-          timestamp: Date.now(),
-          status: 'pending'
-        });
-      }
-    };
+    // Make direct request to Microsoft's device code endpoint
+    const clientId = process.env.CLIENT_ID;
+    const tenantId = process.env.TENANT_ID || 'common';
+    const authority = `https://login.microsoftonline.com/${tenantId}`;
+    
+    const deviceCodeEndpoint = `${authority}/oauth2/v2.0/devicecode`;
+    const tokenEndpoint = `${authority}/oauth2/v2.0/token`;
 
-    // Start device code flow
-    const deviceCodePromise = pca.acquireTokenByDeviceCode(deviceCodeRequest);
+    console.log(`[DEBUG] Device code request to: ${deviceCodeEndpoint}`);
+    console.log(`[DEBUG] Using client_id: ${clientId}`);
+    console.log(`[DEBUG] Using scopes: ${scopes.join(' ')}`);
 
-    // Handle the authentication result
-    deviceCodePromise
-      .then((response) => {
-        console.log(`[AUTH] Device code authentication successful for session: ${sessionId}`);
-        const session = deviceCodeSessions.get(sessionId);
-        if (session) {
-          session.status = 'completed';
-          session.authResult = {
-            accessToken: response.accessToken,
-            idToken: response.idToken,
-            account: response.account,
-            scopes: response.scopes
-          };
-        }
+    // Step 1: Get device code from Microsoft
+    const deviceCodeResponse = await fetch(deviceCodeEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        scope: scopes.join(' ')
       })
-      .catch((error) => {
-        console.error(`[AUTH] Device code authentication failed for session: ${sessionId}`, error);
-        const session = deviceCodeSessions.get(sessionId);
-        if (session) {
-          session.status = 'failed';
-          session.error = error.message;
-        }
-      });
+    });
 
-    // Wait a moment for the callback to populate session data
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!deviceCodeResponse.ok) {
+      const errorText = await deviceCodeResponse.text();
+      throw new Error(`Device code request failed: ${deviceCodeResponse.status} ${errorText}`);
+    }
+
+    const deviceCodeData = await deviceCodeResponse.json();
+    
+    console.log(`[DEVICE CODE] User code: ${deviceCodeData.user_code}`);
+    console.log(`[DEVICE CODE] Device code expires in: ${deviceCodeData.expires_in} seconds`);
+    console.log(`[DEVICE CODE] Polling interval: ${deviceCodeData.interval} seconds`);
+
+    // Store session data for pure custom polling
+    deviceCodeSessions.set(sessionId, {
+      deviceCode: deviceCodeData.device_code,
+      userCode: deviceCodeData.user_code,
+      verificationUri: deviceCodeData.verification_uri,
+      expiresIn: deviceCodeData.expires_in,
+      interval: deviceCodeData.interval,
+      message: deviceCodeData.message,
+      timestamp: Date.now(),
+      status: 'pending',
+      processed: false,
+      // Store endpoints for custom polling
+      tokenEndpoint: tokenEndpoint,
+      clientId: clientId,
+      scopes: scopes
+    });
 
     const session = deviceCodeSessions.get(sessionId);
     if (!session) {
       throw new Error('Failed to initialize device code session');
     }
 
-    // Store the promise for polling after session is created
-    session.tokenPromise = deviceCodePromise;
+    // Don't store the promise to avoid conflicts with MSAL's internal polling
 
     // Generate QR Code for mobile authentication
     const qrCodeData = `${session.verificationUri}?otc=${session.userCode}`;
@@ -183,13 +183,15 @@ app.post('/auth/device-code/start', async (req, res) => {
 });
 
 /**
- * Poll for authentication status
- * The React app will call this endpoint to check if authentication completed
+ * Poll for authentication status with pure custom polling
+ * This endpoint polls Microsoft's token endpoint directly when status is pending
  */
-app.get('/auth/device-code/status/:sessionId', (req, res) => {
+app.get('/auth/device-code/status/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
     const session = deviceCodeSessions.get(sessionId);
+
+    console.log(`[AUTH] Status check for session ${sessionId}: ${session ? session.status : 'NOT_FOUND'}`);
 
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
@@ -199,12 +201,100 @@ app.get('/auth/device-code/status/:sessionId', (req, res) => {
     const now = Date.now();
     const sessionAge = (now - session.timestamp) / 1000; // seconds
     if (sessionAge > session.expiresIn) {
-      deviceCodeSessions.delete(sessionId);
+      console.log(`[AUTH] Session ${sessionId} expired (age: ${sessionAge}s, expires: ${session.expiresIn}s)`);
+      // Don't delete immediately if completed to allow client to retrieve result
+      if (session.status !== 'completed') {
+        deviceCodeSessions.delete(sessionId);
+      }
       return res.json({ status: 'expired' });
     }
 
+    // If still pending and not processed, poll Microsoft's token endpoint
+    if (session.status === 'pending' && !session.processed) {
+      console.log(`[AUTH] Polling token endpoint for session ${sessionId}`);
+      
+      try {
+        console.log(`[DEBUG] Polling token endpoint: ${session.tokenEndpoint}`);
+        console.log(`[DEBUG] Using client_id: ${session.clientId}`);
+        console.log(`[DEBUG] Using device_code: ${session.deviceCode.substring(0, 10)}...`);
+        
+        const tokenResponse = await fetch(session.tokenEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          body: new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+            client_id: session.clientId,
+            device_code: session.deviceCode
+          })
+        });
+
+        const tokenData = await tokenResponse.json();
+
+        console.log(`[DEBUG] Token response status: ${tokenResponse.status}`);
+        console.log(`[DEBUG] Token response data:`, JSON.stringify(tokenData, null, 2));
+
+        if (tokenResponse.ok) {
+          // Success - user completed authentication
+          console.log(`[AUTH] Device code authentication successful for session: ${sessionId}`);
+          session.processed = true;
+          session.status = 'completed';
+          session.authResult = {
+            accessToken: tokenData.access_token,
+            idToken: tokenData.id_token,
+            tokenType: tokenData.token_type,
+            scopes: session.scopes,
+            expiresOn: new Date(Date.now() + (tokenData.expires_in * 1000)),
+            // Create minimal account object from token data
+            account: (() => {
+              let tokenPayload = null;
+              try {
+                tokenPayload = tokenData.id_token ? JSON.parse(Buffer.from(tokenData.id_token.split('.')[1], 'base64').toString()) : null;
+              } catch (e) {
+                console.warn(`[AUTH] Failed to parse ID token for session ${sessionId}:`, e);
+              }
+              
+              return {
+                homeAccountId: tokenData.client_info ? Buffer.from(tokenData.client_info, 'base64').toString() : sessionId,
+                environment: 'login.microsoftonline.com',
+                tenantId: tokenPayload?.tid || 'unknown',
+                username: tokenPayload?.preferred_username || tokenPayload?.upn || 'unknown',
+                name: tokenPayload?.name || 'Unknown User'
+              };
+            })()
+          };
+          console.log(`[AUTH] Session ${sessionId} marked as completed`);
+        } else if (tokenData.error === 'authorization_pending') {
+          // User hasn't completed authentication yet - this is expected
+          console.log(`[AUTH] Session ${sessionId} still pending user authentication`);
+        } else if (tokenData.error === 'authorization_declined') {
+          // User declined authentication
+          console.log(`[AUTH] Session ${sessionId} authentication declined by user`);
+          session.processed = true;
+          session.status = 'failed';
+          session.error = 'Authentication declined by user';
+        } else if (tokenData.error === 'expired_token') {
+          // Device code expired
+          console.log(`[AUTH] Session ${sessionId} device code expired`);
+          session.processed = true;
+          session.status = 'failed';
+          session.error = 'Device code expired';
+        } else {
+          // Other error
+          console.error(`[AUTH] Session ${sessionId} authentication failed:`, tokenData.error_description || tokenData.error);
+          session.processed = true;
+          session.status = 'failed';
+          session.error = tokenData.error_description || tokenData.error;
+        }
+      } catch (pollError) {
+        console.error(`[AUTH] Polling failed for session ${sessionId}:`, pollError);
+        // Don't mark as failed on network errors, keep retrying
+      }
+    }
+
     // Return status without sensitive data
-    res.json({
+    const response = {
       status: session.status,
       userCode: session.userCode,
       expiresIn: Math.max(0, session.expiresIn - sessionAge),
@@ -218,7 +308,10 @@ app.get('/auth/device-code/status/:sessionId', (req, res) => {
       ...(session.status === 'failed' ? {
         error: session.error
       } : {})
-    });
+    };
+
+    console.log(`[AUTH] Returning status for ${sessionId}:`, response.status);
+    res.json(response);
 
   } catch (error) {
     console.error('[AUTH] Status check failed:', error);
