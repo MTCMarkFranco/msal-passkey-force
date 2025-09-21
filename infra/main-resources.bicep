@@ -107,11 +107,11 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
     httpsOnly: true
     siteConfig: {
       alwaysOn: true
-      nodeVersion: '18-lts'
+      nodeVersion: '20-lts'
       appSettings: [
         {
           name: 'WEBSITE_NODE_DEFAULT_VERSION'
-          value: '18.17.0'
+          value: '20.15.1'
         }
         {
           name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
