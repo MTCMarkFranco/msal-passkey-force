@@ -30,14 +30,20 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 
+// Enhanced rate limiting for multi-user kiosk scenarios
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500, // Increased for concurrent users
   message: {
     error: 'Too many requests from this IP, please try again later.'
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Skip rate limiting for local development
+  skip: (req) => {
+    return process.env.NODE_ENV === 'development' && 
+           (req.ip === '127.0.0.1' || req.ip === '::1' || req.ip?.startsWith('192.168.'));
+  }
 });
 
 // Apply security middleware
@@ -63,6 +69,25 @@ app.use(express.urlencoded({ extended: true }));
 
 // In-memory store for device code sessions (use Redis in production)
 const deviceCodeSessions = new Map();
+
+// Session metrics for monitoring concurrent users
+const sessionMetrics = {
+  totalSessions: 0,
+  activeSessions: 0,
+  completedSessions: 0,
+  failedSessions: 0,
+  getActiveSessionCount: () => {
+    let active = 0;
+    for (const session of deviceCodeSessions.values()) {
+      if (session.status === 'pending') active++;
+    }
+    return active;
+  },
+  logMetrics: () => {
+    const active = sessionMetrics.getActiveSessionCount();
+    console.log(`[METRICS] Active: ${active}, Total: ${sessionMetrics.totalSessions}, Completed: ${sessionMetrics.completedSessions}, Failed: ${sessionMetrics.failedSessions}`);
+  }
+};
 
 // Clean up expired sessions every 5 minutes
 setInterval(() => {
@@ -92,6 +117,10 @@ app.post('/auth/device-code/start', async (req, res) => {
     const scopes = process.env.DEFAULT_SCOPES?.split(',') || ['openid', 'profile', 'User.Read'];
 
     console.log(`[AUTH] Starting pure custom device code flow for session: ${sessionId}`);
+    
+    // Update session metrics
+    sessionMetrics.totalSessions++;
+    sessionMetrics.logMetrics();
 
     // Make direct request to Microsoft's device code endpoint
     const clientId = process.env.CLIENT_ID;
@@ -240,6 +269,7 @@ app.get('/auth/device-code/status/:sessionId', async (req, res) => {
           console.log(`[AUTH] Device code authentication successful for session: ${sessionId}`);
           session.processed = true;
           session.status = 'completed';
+          sessionMetrics.completedSessions++;
           session.authResult = {
             accessToken: tokenData.access_token,
             idToken: tokenData.id_token,
@@ -274,12 +304,14 @@ app.get('/auth/device-code/status/:sessionId', async (req, res) => {
           session.processed = true;
           session.status = 'failed';
           session.error = 'Authentication declined by user';
+          sessionMetrics.failedSessions++;
         } else if (tokenData.error === 'expired_token') {
           // Device code expired
           console.log(`[AUTH] Session ${sessionId} device code expired`);
           session.processed = true;
           session.status = 'failed';
           session.error = 'Device code expired';
+          sessionMetrics.failedSessions++;
         } else {
           // Other error
           console.error(`[AUTH] Session ${sessionId} authentication failed:`, tokenData.error_description || tokenData.error);
@@ -389,6 +421,24 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV,
     sessions: deviceCodeSessions.size
+  });
+});
+
+/**
+ * Session metrics endpoint for monitoring concurrent users
+ */
+app.get('/auth/metrics', (req, res) => {
+  const activeCount = sessionMetrics.getActiveSessionCount();
+  const totalSessions = deviceCodeSessions.size;
+  
+  res.json({
+    concurrent_users: activeCount,
+    total_sessions: sessionMetrics.totalSessions,
+    active_sessions: activeCount,
+    stored_sessions: totalSessions,
+    completed_sessions: sessionMetrics.completedSessions,
+    failed_sessions: sessionMetrics.failedSessions,
+    timestamp: new Date().toISOString()
   });
 });
 
