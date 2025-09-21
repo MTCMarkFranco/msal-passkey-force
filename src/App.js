@@ -27,7 +27,7 @@ const api = axios.create({
 
 function App() {
   // Authentication State
-  const [authState, setAuthState] = useState('unauthenticated'); // unauthenticated, authenticating, authenticated, error
+  const [authState, setAuthState] = useState('initializing'); // initializing, authenticating, authenticated, error
   const [sessionId, setSessionId] = useState(null);
   const [user, setUser] = useState(null);
   const [authData, setAuthData] = useState(null);
@@ -37,6 +37,31 @@ function App() {
   const [count, setCount] = useState(0);
   const [message, setMessage] = useState('Welcome to Secure Kiosk!');
   const [userProfile, setUserProfile] = useState(null);
+
+  // Auto-start authentication on component mount
+  useEffect(() => {
+    console.log('🔐 App initialized - Auto-starting authentication...');
+    startAuthentication();
+  }, []); // Empty dependency array means this runs once when component mounts
+
+  // Auto-retry on error after 5 seconds
+  useEffect(() => {
+    let retryTimeout;
+    
+    if (authState === 'error') {
+      console.log('⚠️ Authentication error - Will retry in 5 seconds...');
+      retryTimeout = setTimeout(() => {
+        console.log('🔄 Auto-retrying authentication...');
+        startAuthentication();
+      }, 5000);
+    }
+
+    return () => {
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
+      }
+    };
+  }, [authState]); // Runs when authState changes to 'error'
 
   // Polling for authentication status
   useEffect(() => {
@@ -140,7 +165,7 @@ function App() {
       }
       
       // Reset all state
-      setAuthState('unauthenticated');
+      setAuthState('initializing');
       setSessionId(null);
       setUser(null);
       setUserProfile(null);
@@ -149,17 +174,27 @@ function App() {
       setMessage('Welcome to Secure Kiosk!');
       setCount(0);
       
-      console.log('🔓 Logged out successfully');
+      console.log('🔓 Logged out successfully - Auto-restarting authentication...');
+      
+      // Auto-restart authentication after logout
+      setTimeout(() => {
+        startAuthentication();
+      }, 1000);
       
     } catch (error) {
       console.error('Logout failed:', error);
       // Force reset even if logout API fails
-      setAuthState('unauthenticated');
+      setAuthState('initializing');
       setSessionId(null);
       setUser(null);
       setUserProfile(null);
       setAuthData(null);
       setError(null);
+      
+      // Still restart authentication
+      setTimeout(() => {
+        startAuthentication();
+      }, 1000);
     }
   };
 
@@ -181,34 +216,33 @@ function App() {
     setMessage(randomMessage);
   };
 
-  // Render authentication screen
-  if (authState === 'unauthenticated') {
+  // Render initialization screen (briefly shown while starting auth)
+  if (authState === 'initializing') {
     return (
       <div className="app">
         <header className="app-header">
           <h1>🔐 Secure Kiosk</h1>
-          <p className="message">Enterprise-Grade Authentication</p>
+          <p className="message">Initializing Authentication...</p>
         </header>
         
         <main className="app-main">
           <div className="auth-section">
-            <h2>Sign In Required</h2>
-            <p>This kiosk requires authentication using your mobile device with passkey support.</p>
-            
-            <div className="security-features">
-              <h3>🛡️ Security Features</h3>
-              <ul>
-                <li>✅ PKCE (Proof Key for Code Exchange)</li>
-                <li>✅ Device Code Flow for kiosks</li>
-                <li>✅ Passkey authentication support</li>
-                <li>✅ Microsoft Entra ID protection</li>
-                <li>✅ QR code mobile sign-in</li>
-              </ul>
+            <div className="auth-progress">
+              <div className="loading-spinner"></div>
+              <h2>Starting Secure Authentication</h2>
+              <p>Generating QR code for mobile sign-in...</p>
+              
+              <div className="security-features">
+                <h3>🛡️ Security Features Active</h3>
+                <ul>
+                  <li>✅ PKCE (Proof Key for Code Exchange)</li>
+                  <li>✅ Device Code Flow for kiosks</li>
+                  <li>✅ Passkey authentication support</li>
+                  <li>✅ Microsoft Entra ID protection</li>
+                  <li>✅ QR code mobile sign-in</li>
+                </ul>
+              </div>
             </div>
-            
-            <button onClick={startAuthentication} className="btn btn-primary btn-large">
-              🔑 Start Secure Sign-In
-            </button>
           </div>
         </main>
         
@@ -269,7 +303,7 @@ function App() {
       <div className="app">
         <header className="app-header">
           <h1>❌ Authentication Error</h1>
-          <p className="message">Please try again</p>
+          <p className="message">Retrying automatically...</p>
         </header>
         
         <main className="app-main">
@@ -277,12 +311,14 @@ function App() {
             <h2>Authentication Failed</h2>
             <p className="error-message">{error}</p>
             
+            <div className="auth-progress">
+              <div className="loading-spinner"></div>
+              <p>Automatically retrying in 5 seconds...</p>
+            </div>
+            
             <div className="button-group">
               <button onClick={startAuthentication} className="btn btn-primary">
-                Try Again
-              </button>
-              <button onClick={() => setAuthState('unauthenticated')} className="btn btn-secondary">
-                Back
+                Retry Now
               </button>
             </div>
           </div>

@@ -116,9 +116,6 @@ app.post('/auth/device-code/start', async (req, res) => {
 
     // Start device code flow
     const deviceCodePromise = pca.acquireTokenByDeviceCode(deviceCodeRequest);
-    
-    // Store the promise for polling
-    deviceCodeSessions.get(sessionId).tokenPromise = deviceCodePromise;
 
     // Handle the authentication result
     deviceCodePromise
@@ -151,6 +148,9 @@ app.post('/auth/device-code/start', async (req, res) => {
     if (!session) {
       throw new Error('Failed to initialize device code session');
     }
+
+    // Store the promise for polling after session is created
+    session.tokenPromise = deviceCodePromise;
 
     // Generate QR Code for mobile authentication
     const qrCodeData = `${session.verificationUri}?otc=${session.userCode}`;
