@@ -9,8 +9,44 @@ import axios from 'axios';
  * - QR Code authentication for kiosk scenarios
  * - Passkey support through Entra ID
  * - Automatic token refresh and session management
+ * - Token caching with silent login
  * - Secure API integration
  */
+
+// Cookie utilities for token caching
+const CookieUtils = {
+  set: (name, value, days = 7) => {
+    const expires = new Date();
+    expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
+    document.cookie = `${name}=${encodeURIComponent(JSON.stringify(value))};expires=${expires.toUTCString()};path=/;secure;samesite=strict`;
+  },
+  
+  get: (name) => {
+    const nameEQ = name + "=";
+    const ca = document.cookie.split(';');
+    for(let i = 0; i < ca.length; i++) {
+      let c = ca[i];
+      while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+      if (c.indexOf(nameEQ) === 0) {
+        try {
+          return JSON.parse(decodeURIComponent(c.substring(nameEQ.length, c.length)));
+        } catch (e) {
+          console.warn('Failed to parse cookie:', name);
+          return null;
+        }
+      }
+    }
+    return null;
+  },
+  
+  delete: (name) => {
+    document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/;`;
+  },
+  
+  exists: (name) => {
+    return CookieUtils.get(name) !== null;
+  }
+};
 
 // API Configuration
 const API_BASE_URL = process.env.NODE_ENV === 'production' 
@@ -25,36 +61,45 @@ const api = axios.create({
   }
 });
 
+// Token cache constants
+const AUTH_TOKEN_COOKIE = 'msal_auth_token';
+const AUTH_USER_COOKIE = 'msal_user_info';
+
 function App() {
   // Authentication State
-  const [authState, setAuthState] = useState('initializing'); // initializing, authenticating, authenticated, error
+  const [authState, setAuthState] = useState('checking_cache'); // checking_cache, initializing, authenticating, authenticated, error
   const [sessionId, setSessionId] = useState(null);
   const [user, setUser] = useState(null);
   const [authData, setAuthData] = useState(null);
   const [error, setError] = useState(null);
   const [isAuthStarting, setIsAuthStarting] = useState(false); // Prevent multiple auth starts
+  const [cachedToken, setCachedToken] = useState(null);
 
   // App State
   const [count, setCount] = useState(0);
   const [message, setMessage] = useState('Welcome to Secure Kiosk!');
   const [userProfile, setUserProfile] = useState(null);
 
-  // Auto-start authentication on component mount (with safeguards against multiple calls)
+  // Preflight check: Look for cached token and attempt silent login
   useEffect(() => {
     if (process.env.NODE_ENV === 'development') {
-      console.log('🔐 App initialized - Checking if authentication should start...');
+      console.log('🔐 App initialized - Starting preflight token check...');
     }
     
-    // Only start authentication if not already started and not in progress
-    if (authState === 'initializing' && !isAuthStarting && !sessionId) {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('🔐 Starting authentication...');
-      }
-      startAuthentication();
-    } else if (process.env.NODE_ENV === 'development') {
-      console.log('🔐 Authentication already started or in progress, skipping...');
+    if (authState === 'checking_cache') {
+      performPreflightCheck();
     }
   }, []); // Empty dependency array means this runs once when component mounts
+
+  // Auto-start authentication if no cached token found
+  useEffect(() => {
+    if (authState === 'initializing' && !isAuthStarting && !sessionId) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔐 No cached token found - Starting device code authentication...');
+      }
+      startAuthentication();
+    }
+  }, [authState, isAuthStarting, sessionId]);
 
   // Only retry on specific authentication errors, not connection errors
   useEffect(() => {
@@ -111,6 +156,9 @@ function App() {
             // Clear any existing errors
             setError(null);
             
+            // Get token and cache it
+            await cacheAuthenticationData(authUser);
+            
             // Fetch user profile from Microsoft Graph
             fetchUserProfile();
           } else if (status === 'failed') {
@@ -154,6 +202,139 @@ function App() {
   }, [authState, sessionId]); // Dependencies: authState and sessionId
 
   // Initialize authentication with safeguards against multiple calls
+  // Preflight check: Attempt to authenticate with cached token
+  const performPreflightCheck = async () => {
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔍 Performing preflight token check...');
+    }
+    
+    try {
+      // Check if we have a cached token
+      const cachedTokenData = CookieUtils.get(AUTH_TOKEN_COOKIE);
+      const cachedUserData = CookieUtils.get(AUTH_USER_COOKIE);
+      
+      if (!cachedTokenData || !cachedUserData) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('❌ No cached token found - proceeding with device code flow');
+        }
+        setAuthState('initializing');
+        return;
+      }
+      
+      // Check if token is expired
+      const tokenExpiresOn = new Date(cachedTokenData.expiresOn);
+      const now = new Date();
+      const timeUntilExpiry = tokenExpiresOn.getTime() - now.getTime();
+      
+      if (timeUntilExpiry <= 60000) { // Token expires within 1 minute
+        if (process.env.NODE_ENV === 'development') {
+          console.log('⏰ Cached token is expired or about to expire - clearing cache');
+        }
+        CookieUtils.delete(AUTH_TOKEN_COOKIE);
+        CookieUtils.delete(AUTH_USER_COOKIE);
+        setAuthState('initializing');
+        return;
+      }
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('✅ Found valid cached token - attempting silent login');
+        console.log(`🕒 Token expires in: ${Math.round(timeUntilExpiry / 1000 / 60)} minutes`);
+      }
+      
+      // Validate the cached token via server
+      const validationResponse = await api.post('/auth/validate-token', {
+        accessToken: cachedTokenData.accessToken
+      });
+      
+      if (validationResponse.data.valid) {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🎉 Silent login successful!');
+        }
+        
+        // Set up axios interceptor to use the cached token
+        api.defaults.headers.common['Authorization'] = `${cachedTokenData.tokenType} ${cachedTokenData.accessToken}`;
+        setCachedToken(cachedTokenData);
+        
+        // Restore user state
+        setUser(cachedUserData);
+        
+        // Fetch fresh user profile
+        try {
+          const profileResponse = await api.get('https://graph.microsoft.com/v1.0/me');
+          setUserProfile(profileResponse.data);
+        } catch (profileError) {
+          console.warn('Failed to fetch fresh profile:', profileError);
+          // Use cached user data as fallback
+          setUserProfile({
+            displayName: cachedUserData.name,
+            userPrincipalName: cachedUserData.username
+          });
+        }
+        
+        setAuthState('authenticated');
+        setError(null);
+        return;
+      } else {
+        if (process.env.NODE_ENV === 'development') {
+          console.log('❌ Cached token is no longer valid');
+        }
+      }
+      
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('❌ Silent login failed:', error.response?.status, error.message);
+      }
+      
+      // Clear invalid cached data
+      CookieUtils.delete(AUTH_TOKEN_COOKIE);
+      CookieUtils.delete(AUTH_USER_COOKIE);
+      delete api.defaults.headers.common['Authorization'];
+      setCachedToken(null);
+    }
+    
+    // Fall back to device code flow
+    setAuthState('initializing');
+  };
+
+  // Cache authentication data after successful login
+  const cacheAuthenticationData = async (authUser) => {
+    try {
+      if (!sessionId) {
+        console.warn('No session ID available for token caching');
+        return;
+      }
+      
+      // Get the access token from the server
+      const tokenResponse = await api.get(`/auth/token/${sessionId}`);
+      const tokenData = tokenResponse.data;
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('💾 Caching authentication data...');
+      }
+      
+      // Cache token data
+      CookieUtils.set(AUTH_TOKEN_COOKIE, {
+        accessToken: tokenData.accessToken,
+        tokenType: tokenData.tokenType || 'Bearer',
+        scopes: tokenData.scopes,
+        expiresOn: tokenData.expiresOn
+      }, 7); // Cache for 7 days
+      
+      // Cache user data
+      CookieUtils.set(AUTH_USER_COOKIE, authUser, 7);
+      
+      // Set up axios interceptor for future API calls
+      api.defaults.headers.common['Authorization'] = `${tokenData.tokenType || 'Bearer'} ${tokenData.accessToken}`;
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('✅ Authentication data cached successfully');
+      }
+      
+    } catch (error) {
+      console.error('Failed to cache authentication data:', error);
+    }
+  };
+
   const startAuthentication = async () => {
     // Prevent multiple simultaneous authentication attempts
     if (isAuthStarting || authState === 'authenticating' || sessionId) {
@@ -248,6 +429,12 @@ function App() {
         await api.post(`/auth/logout/${sessionId}`);
       }
       
+      // Clear cached authentication data
+      CookieUtils.delete(AUTH_TOKEN_COOKIE);
+      CookieUtils.delete(AUTH_USER_COOKIE);
+      delete api.defaults.headers.common['Authorization'];
+      setCachedToken(null);
+      
       // Reset all state
       setAuthState('initializing');
       setSessionId(null);
@@ -260,7 +447,7 @@ function App() {
       setCount(0);
       
       if (process.env.NODE_ENV === 'development') {
-        console.log('🔓 Logged out successfully - Ready for new authentication');
+        console.log('🔓 Logged out successfully - Cache cleared - Ready for new authentication');
       }
       
       // Don't auto-restart - let user manually authenticate if needed
@@ -271,6 +458,11 @@ function App() {
         console.error('Logout failed:', error);
       }
       // Force reset even if logout API fails
+      CookieUtils.delete(AUTH_TOKEN_COOKIE);
+      CookieUtils.delete(AUTH_USER_COOKIE);
+      delete api.defaults.headers.common['Authorization'];
+      setCachedToken(null);
+      
       setAuthState('initializing');
       setSessionId(null);
       setUser(null);
@@ -302,6 +494,31 @@ function App() {
   };
 
   // Render initialization screen (briefly shown while starting auth)
+  // Loading state for cache check
+  if (authState === 'checking_cache') {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <h1>🔐 Secure Kiosk</h1>
+          <p className="message">Checking for existing session...</p>
+        </header>
+        
+        <main className="app-main">
+          <div className="auth-section">
+            <div className="auth-progress">
+              <div className="loading-spinner"></div>
+              <h2>🔍 Checking Cached Authentication</h2>
+              <p>Looking for existing login session...</p>
+              <div className="security-note">
+                <p><strong>🔒 Attempting Silent Login:</strong> Checking for valid authentication token in secure browser storage.</p>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   if (authState === 'initializing') {
     return (
       <div className="app">
@@ -417,6 +634,16 @@ function App() {
             <div className="button-group">
               <button onClick={startAuthentication} className="btn btn-primary">
                 Try Again Now
+              </button>
+              <button onClick={() => {
+                CookieUtils.delete(AUTH_TOKEN_COOKIE);
+                CookieUtils.delete(AUTH_USER_COOKIE);
+                delete api.defaults.headers.common['Authorization'];
+                setCachedToken(null);
+                setAuthState('checking_cache');
+                setTimeout(() => performPreflightCheck(), 100);
+              }} className="btn btn-secondary">
+                Clear Cache & Retry
               </button>
             </div>
           </div>

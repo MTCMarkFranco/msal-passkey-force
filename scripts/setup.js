@@ -27,8 +27,7 @@ console.log('✅ .env file found');
 // Validate required environment variables
 const requiredVars = [
   'CLIENT_ID',
-  'TENANT_ID', 
-  'CLIENT_SECRET'
+  'TENANT_ID'
 ];
 
 const missingVars = [];
@@ -83,15 +82,10 @@ if (missingVars.length > 0 || defaultValues.length > 0) {
   console.log('   - Microsoft Graph > Profile (Delegated)');
   console.log('   - Microsoft Graph > OpenId (Delegated)\n');
   
-  console.log('4. Create Client Secret:');
-  console.log('   - Go to Certificates & secrets');
-  console.log('   - Create new client secret');
-  console.log('   - Copy the value immediately\n');
-  
-  console.log('5. Update .env file with:');
+  console.log('4. Update .env file with:');
   console.log('   - CLIENT_ID from app registration');
-  console.log('   - TENANT_ID from app registration');
-  console.log('   - CLIENT_SECRET from step 4\n');
+  console.log('   - TENANT_ID from app registration\n');
+  console.log('   Note: No client secret needed for Device Code Flow\n');
   
   process.exit(1);
 } else {
@@ -107,8 +101,7 @@ try {
   const msalConfig = {
     auth: {
       clientId: process.env.CLIENT_ID,
-      authority: `https://login.microsoftonline.com/${process.env.TENANT_ID}`,
-      clientSecret: process.env.CLIENT_SECRET
+      authority: `https://login.microsoftonline.com/${process.env.TENANT_ID}`
     }
   };
   

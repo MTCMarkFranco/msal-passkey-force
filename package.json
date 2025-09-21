@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Secure Kiosk React App with Entra ID, PKCE, and Passkey Authentication",
   "main": "server/index.js",
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
+  },
   "scripts": {
     "setup": "node scripts/setup.js",
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
@@ -50,6 +54,10 @@
     "kiosk",
     "security"
   ],
-  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MTCMarkFranco/msal-passkey-force.git"
+  },
+  "author": "MTCMarkFranco",
   "license": "MIT"
 }

@@ -118,6 +118,14 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
           value: 'true'
         }
         {
+          name: 'SCM_NODE_DEFAULT_VERSION'
+          value: '20.15.1'
+        }
+        {
+          name: 'WEBSITE_DISABLE_SCM_SEPARATION'
+          value: 'true'
+        }
+        {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: applicationInsights.properties.ConnectionString
         }
@@ -125,17 +133,14 @@ resource webApp 'Microsoft.Web/sites@2023-12-01' = {
           name: 'ApplicationInsightsAgent_EXTENSION_VERSION'
           value: '~3'
         }
-        {
-          name: 'PORT'
-          value: '3001'
-        }
+
         {
           name: 'NODE_ENV'
           value: 'production'
         }
         {
           name: 'ALLOWED_ORIGINS'
-          value: 'https://${webAppName}.azurewebsites.net'
+          value: 'https://play.hub-quiz.com'
         }
 
       ]

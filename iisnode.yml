@@ -1,0 +1,26 @@
+# iisnode configuration for Azure App Service
+# This file provides additional configuration for iisnode
+
+# Enable detailed error logging
+loggingEnabled: true
+logDirectory: iisnode
+
+# Node.js process configuration
+nodeProcessCountPerApplication: 0
+maxConcurrentRequestsPerProcess: 1024
+
+# Retry configuration for better reliability
+maxNamedPipeConnectionRetry: 200
+namedPipeConnectionRetryDelay: 250
+
+# Timeout configuration
+maxRequestLength: 134217728
+
+# Performance optimizations
+flushResponse: false
+
+# Environment variables to promote
+promoteServerVars: WEBSOCKET_URL,HTTP_X_FORWARDED_FOR,HTTP_X_FORWARDED_PROTO
+
+# Watch for changes (development)
+watchedFiles: web.config;*.js;server/*.js
