@@ -138,32 +138,36 @@ npm run setup
 This will verify:
 - ✅ All required environment variables are configured
 - ✅ MSAL configuration is valid
-- ✅ Required ports (3000, 3001) are available
+- ✅ Required port (3000) is available
 - ✅ Dependencies are properly installed
 
 If you see any errors, follow the detailed instructions provided by the script.
 
-### **5. Development Mode**
+### **5. Development & Production**
 
-Run both client and server concurrently:
+The application now runs as a **consolidated single-server setup** on port 3000:
 
 ```bash
+# For quick development (builds and starts)
 npm run dev
-```
 
-This starts:
-- React app on `http://localhost:3000`
-- Auth server on `http://localhost:3001`
+# For development with hot-reload watching
+npm run dev:watch
 
-### **6. Production Deployment**
-
-```bash
-# Build the application
-npm run build
-
-# Start production server
+# For production
 npm start
 ```
+
+**Single Server Benefits:**
+- ✅ **Simplified deployment** - One server, one port
+- ✅ **No CORS issues** - Frontend and backend on same origin  
+- ✅ **Better security** - No cross-origin requests
+- ✅ **Azure-ready** - Perfect for App Service deployment
+
+The server now serves:
+- **React SPA** at `http://localhost:3000/`
+- **API endpoints** at `http://localhost:3000/auth/*`
+- **Health check** at `http://localhost:3000/health`
 
 ## 📱 How to Use
 

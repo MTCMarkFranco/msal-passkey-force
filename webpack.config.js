@@ -37,12 +37,10 @@ module.exports = {
     },
     compress: true,
     port: 3000,
-    open: false, // Don't auto-open since we'll use npm run dev
+    open: false,
     hot: true,
     historyApiFallback: true,
-    proxy: {
-      '/auth': 'http://localhost:3001',
-      '/health': 'http://localhost:3001'
-    }
+    // Note: This dev server is now only used for client:dev script
+    // The main dev script uses the consolidated server
   },
 };

@@ -48,10 +48,8 @@ const CookieUtils = {
   }
 };
 
-// API Configuration
-const API_BASE_URL = process.env.NODE_ENV === 'production' 
-  ? window.location.origin 
-  : 'http://localhost:3001';
+// API Configuration - Now using same server for frontend and backend
+const API_BASE_URL = window.location.origin;
 
 const api = axios.create({
   baseURL: API_BASE_URL,

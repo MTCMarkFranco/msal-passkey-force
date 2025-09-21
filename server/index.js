@@ -21,7 +21,7 @@ const QRCode = require('qrcode');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // Enhanced rate limiting for multi-user kiosk scenarios
 const limiter = rateLimit({
@@ -167,14 +167,14 @@ setInterval(() => {
   
   for (const [sessionId, session] of deviceCodeSessions.entries()) {
     const sessionAge = (now - session.timestamp) / 1000;
-    if (sessionAge > session.expiresIn + 300) { // Add 5 minute buffer
+    if (sessionAge > 86400) { // Remove sessions older than 24 hours (86400 seconds)
       deviceCodeSessions.delete(sessionId);
       cleaned++;
     }
   }
   
   if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} expired sessions`);
+    console.log(`[CLEANUP] Removed ${cleaned} sessions older than 24 hours`);
   }
 }, 300000); // Run every 5 minutes
 
@@ -350,6 +350,7 @@ app.post('/auth/device-code/start', async (req, res) => {
       interval: deviceCodeData.interval,
       message: deviceCodeData.message,
       timestamp: Date.now(),
+      expiresAt: Date.now() + (deviceCodeData.expires_in * 1000), // Add expiration timestamp
       status: 'pending',
       processed: false,
       // Store endpoints for server-side polling
@@ -564,7 +565,7 @@ app.post('/auth/logout/:sessionId', (req, res) => {
     console.log(`[LOGOUT] Session cleaned up, Total sessions after cleanup: ${deviceCodeSessions.size}`);
 
     // Provide logout URL for complete sign-out
-    const logoutUrl = `https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(process.env.POST_LOGOUT_REDIRECT_URI || 'http://localhost:3001')}`;
+    const logoutUrl = `https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(process.env.POST_LOGOUT_REDIRECT_URI || `http://localhost:${PORT}`)}`;
 
     const responseData = {
       success: true,
@@ -581,30 +582,37 @@ app.post('/auth/logout/:sessionId', (req, res) => {
   }
 });
 
-// Serve React app in production and Azure App Service
-if (process.env.NODE_ENV === 'production' || process.env.WEBSITE_NODE_DEFAULT_VERSION) {
-  const staticPath = path.join(__dirname, '../dist');
-  console.log(`📂 Serving static files from: ${staticPath}`);
+// Serve React app - static files and SPA routing
+const staticPath = path.join(__dirname, '../dist');
+console.log(`📂 Serving static files from: ${staticPath}`);
+
+// Serve static files with proper caching headers
+app.use(express.static(staticPath, {
+  maxAge: process.env.NODE_ENV === 'production' ? '1d' : '0',
+  etag: true,
+  lastModified: true
+}));
+
+// API routes should be defined before the catch-all handler
+// (All API routes are already defined above)
+
+// Catch-all handler: send back React's index.html file for client-side routing
+// This should be AFTER all API routes
+app.get('*', (req, res) => {
+  // Skip serving index.html for API routes
+  if (req.path.startsWith('/auth/') || req.path.startsWith('/health')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
   
-  // Serve static files with proper caching headers
-  app.use(express.static(staticPath, {
-    maxAge: '1d',
-    etag: true,
-    lastModified: true
-  }));
-  
-  // Catch-all handler: send back React's index.html file for client-side routing
-  app.get('*', (req, res) => {
-    const indexPath = path.join(staticPath, 'index.html');
-    console.log(`🌐 Serving index.html for route: ${req.path}`);
-    res.sendFile(indexPath, (err) => {
-      if (err) {
-        console.error(`❌ Error serving index.html:`, err);
-        res.status(500).send('Error loading application');
-      }
-    });
+  const indexPath = path.join(staticPath, 'index.html');
+  console.log(`🌐 Serving index.html for route: ${req.path}`);
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      console.error(`❌ Error serving index.html:`, err);
+      res.status(500).send('Error loading application');
+    }
   });
-}
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -673,9 +681,12 @@ if (process.env.WEBSITE_NODE_DEFAULT_VERSION) {
     // Load persisted sessions on startup
     await loadSessions();
     
+    console.log(`🌐 Application URL: http://localhost:${PORT}`);
+    console.log(`� API endpoints: http://localhost:${PORT}/auth/*`);
+    console.log(`� Health check: http://localhost:${PORT}/health`);
+    
     if (process.env.NODE_ENV === 'development') {
-      console.log(`📱 React app: http://localhost:3000`);
-      console.log(`🔑 Auth server: http://localhost:${PORT}`);
+      console.log(`💡 For development with hot-reload: npm run dev:watch`);
     }
   });
 }

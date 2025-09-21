@@ -9,13 +9,14 @@
   },
   "scripts": {
     "setup": "node scripts/setup.js",
-    "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
+    "dev": "npm run build && npm run server:dev",
+    "dev:watch": "concurrently \"npm run client:watch\" \"npm run server:dev\"",
     "server:dev": "nodemon server/index.js",
     "client:dev": "webpack serve --mode development",
-    "build": "webpack --mode production && npm run server:build",
-    "server:build": "echo 'Server build complete'",
-    "start": "node server/index.js",
-    "client:build": "webpack --mode production"
+    "client:watch": "webpack --mode development --watch",
+    "build": "webpack --mode production",
+    "start": "npm run build && node server/index.js",
+    "start:prod": "node server/index.js"
   },
   "dependencies": {
     "react": "^18.2.0",
