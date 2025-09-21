@@ -44,16 +44,20 @@ function App() {
     startAuthentication();
   }, []); // Empty dependency array means this runs once when component mounts
 
-  // Auto-retry on error after 5 seconds
+  // Only retry on specific authentication errors, not connection errors
   useEffect(() => {
     let retryTimeout;
     
-    if (authState === 'error') {
-      console.log('⚠️ Authentication error - Will retry in 5 seconds...');
+    // Only retry for authentication-specific errors, not after successful auth
+    if (authState === 'error' && error && 
+        (error.includes('expired') || error.includes('Authentication failed') || error.includes('AADSTS'))) {
+      console.log('⚠️ Authentication error detected - Will retry in 5 seconds...', error);
       retryTimeout = setTimeout(() => {
-        console.log('🔄 Auto-retrying authentication...');
+        console.log('🔄 Auto-retrying authentication due to auth error...');
         startAuthentication();
       }, 5000);
+    } else if (authState === 'error') {
+      console.log('❌ Connection or system error - No auto-retry:', error);
     }
 
     return () => {
@@ -61,19 +65,24 @@ function App() {
         clearTimeout(retryTimeout);
       }
     };
-  }, [authState]); // Runs when authState changes to 'error'
+  }, [authState, error]); // Runs when authState or error changes
 
   // Polling for authentication status
   useEffect(() => {
     let pollInterval;
 
     if (authState === 'authenticating' && sessionId) {
+      console.log('🔍 Starting authentication polling for session:', sessionId);
+      
       pollInterval = setInterval(async () => {
         try {
           const response = await api.get(`/auth/device-code/status/${sessionId}`);
           const { status, user: authUser, error: authError } = response.data;
 
+          console.log('📊 Poll result:', { status, sessionId });
+
           if (status === 'completed') {
+            console.log('✅ Authentication completed successfully!');
             setAuthState('authenticated');
             setUser(authUser);
             clearInterval(pollInterval);
@@ -81,16 +90,21 @@ function App() {
             // Fetch user profile from Microsoft Graph
             fetchUserProfile();
           } else if (status === 'failed') {
+            console.log('❌ Authentication failed:', authError);
             setAuthState('error');
             setError(authError || 'Authentication failed');
             clearInterval(pollInterval);
           } else if (status === 'expired') {
+            console.log('⏰ Authentication session expired');
             setAuthState('error');
             setError('Authentication session expired. Please try again.');
             clearInterval(pollInterval);
+          } else if (status === 'pending') {
+            console.log('⏳ Still waiting for user authentication...');
+            // Continue polling
           }
         } catch (err) {
-          console.error('Polling error:', err);
+          console.error('❌ Polling error:', err);
           setError('Connection error during authentication');
           setAuthState('error');
           clearInterval(pollInterval);
@@ -98,12 +112,14 @@ function App() {
       }, 3000); // Poll every 3 seconds
     }
 
+    // Cleanup function
     return () => {
       if (pollInterval) {
+        console.log('🛑 Stopping authentication polling');
         clearInterval(pollInterval);
       }
     };
-  }, [authState, sessionId]);
+  }, [authState, sessionId]); // Dependencies: authState and sessionId
 
   // Initialize authentication
   const startAuthentication = async () => {
@@ -132,6 +148,12 @@ function App() {
       setAuthState('error');
       setError(error.response?.data?.message || 'Failed to initialize authentication');
     }
+  };
+
+  // Generate a new authentication code
+  const generateNewCode = async () => {
+    console.log('🔄 Generating new authentication code...');
+    await startAuthentication();
   };
 
   // Fetch user profile using Microsoft Graph API
@@ -288,9 +310,14 @@ function App() {
               </>
             )}
             
-            <button onClick={logout} className="btn btn-secondary">
-              Cancel Authentication
-            </button>
+            <div className="button-group">
+              <button onClick={generateNewCode} className="btn btn-primary">
+                Generate New Code
+              </button>
+              <button onClick={logout} className="btn btn-secondary">
+                Cancel Authentication
+              </button>
+            </div>
           </div>
         </main>
       </div>
@@ -299,26 +326,34 @@ function App() {
 
   // Render error state
   if (authState === 'error') {
+    const isAuthError = error && (error.includes('expired') || error.includes('Authentication failed') || error.includes('AADSTS'));
+    
     return (
       <div className="app">
         <header className="app-header">
           <h1>❌ Authentication Error</h1>
-          <p className="message">Retrying automatically...</p>
+          <p className="message">
+            {isAuthError ? 'Will retry automatically...' : 'Manual retry required'}
+          </p>
         </header>
         
         <main className="app-main">
           <div className="error-section">
-            <h2>Authentication Failed</h2>
+            <h2>{isAuthError ? 'Authentication Failed' : 'Connection Error'}</h2>
             <p className="error-message">{error}</p>
             
-            <div className="auth-progress">
-              <div className="loading-spinner"></div>
-              <p>Automatically retrying in 5 seconds...</p>
-            </div>
+            {isAuthError ? (
+              <div className="auth-progress">
+                <div className="loading-spinner"></div>
+                <p>Automatically retrying in 5 seconds...</p>
+              </div>
+            ) : (
+              <p>Please check your connection and try again.</p>
+            )}
             
             <div className="button-group">
               <button onClick={startAuthentication} className="btn btn-primary">
-                Retry Now
+                Try Again Now
               </button>
             </div>
           </div>
