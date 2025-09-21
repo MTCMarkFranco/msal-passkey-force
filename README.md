@@ -51,44 +51,75 @@ A React Single Page Application (SPA) with enterprise-grade security featuring:
 
 ## 🚀 Setup Instructions
 
-### **1. Entra ID App Registration**
+### **1. Entra ID App Registration - Detailed Steps**
 
-1. Go to [Azure Portal](https://portal.azure.com) → Microsoft Entra ID → App registrations
-2. Create new registration:
+#### **Step 1: Create Entra ID App Registration**
+1. Go to [Azure Portal](https://portal.azure.com)
+2. Navigate to **Microsoft Entra ID** > **App registrations**
+3. Click **New registration**
+4. Create new registration with these settings:
    - **Name**: `Secure Kiosk App`
-   - **Supported account types**: `Accounts in this organizational directory only`
-   - **Redirect URI**: `Public client/native` → `http://localhost:3001/auth/callback`
+   - **Supported account types**: `Accounts in this organizational directory only (Single tenant)`
+   - **Redirect URI**: Select `Public client/native (mobile & desktop)`
+   - **URI**: `http://localhost:3001/auth/callback`
+5. Click **Register**
 
-3. **Authentication Settings**:
-   - Add additional redirect URI: `https://login.microsoftonline.com/common/oauth2/nativeclient`
-   - Enable **Allow public client flows**: Yes
-   - Advanced settings → **Allow public client flows**: Yes
+#### **Step 2: Configure Authentication**
+1. In your app registration, go to **Authentication** in the left menu
+2. Under **Redirect URIs**, click **Add URI**
+3. Add redirect URI: `https://login.microsoftonline.com/common/oauth2/nativeclient`
+4. Under **Advanced settings**, enable **Allow public client flows**: `Yes`
+5. Click **Save**
 
-4. **API Permissions**:
-   ```
-   Microsoft Graph:
-   - User.Read (Delegated)
-   - Profile (Delegated) 
-   - OpenId (Delegated)
-   ```
+#### **Step 3: Add API Permissions**
+1. Go to **API permissions** in the left menu
+2. Click **Add a permission**
+3. Select **Microsoft Graph**
+4. Select **Delegated permissions**
+5. Add these permissions:
+   - **User.Read** (Delegated) - Sign in and read user profile
+   - **Profile** (Delegated) - View users' basic profile
+   - **OpenId** (Delegated) - Sign users in
+6. Click **Add permissions**
+7. (Optional) Click **Grant admin consent** if you have admin rights
 
-5. **Certificates & Secrets**:
-   - Create new client secret (for server-side flows)
-   - Copy the secret value immediately
+#### **Step 4: Create Client Secret**
+1. Go to **Certificates & secrets** in the left menu
+2. Under **Client secrets**, click **New client secret**
+3. Add description: `Secure Kiosk Server Secret`
+4. Set expiration (recommended: 12-24 months)
+5. Click **Add**
+6. **IMPORTANT**: Copy the secret **Value** immediately (it won't be shown again)
 
-6. **Copy Configuration**:
-   - Application (client) ID
-   - Directory (tenant) ID
-   - Client secret value
+#### **Step 5: Copy Configuration Values**
+From your app registration **Overview** page, copy:
+- **Application (client) ID**
+- **Directory (tenant) ID**
+- **Client secret value** (from step 4)
 
 ### **2. Environment Setup**
 
+#### **Step 6: Update .env File**
 1. Copy environment template:
    ```bash
    cp .env.example .env
    ```
 
-2. Update `.env` file with your Entra ID configuration
+2. Edit the `.env` file and update these values with your Entra ID configuration:
+   ```bash
+   # Replace these with your actual values from the app registration
+   CLIENT_ID=your-application-client-id-from-step-5
+   TENANT_ID=your-directory-tenant-id-from-step-5  
+   CLIENT_SECRET=your-client-secret-value-from-step-4
+   
+   # These can stay as defaults for development
+   PORT=3001
+   NODE_ENV=development
+   ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3001
+   # ... rest of the configuration
+   ```
+
+3. **Security Note**: Never commit the `.env` file to version control (it's already in `.gitignore`)
 
 ### **3. Install Dependencies**
 
@@ -96,7 +127,23 @@ A React Single Page Application (SPA) with enterprise-grade security featuring:
 npm install
 ```
 
-### **4. Development Mode**
+### **4. Validate Setup**
+
+Run the setup validation script to check your configuration:
+
+```bash
+npm run setup
+```
+
+This will verify:
+- ✅ All required environment variables are configured
+- ✅ MSAL configuration is valid
+- ✅ Required ports (3000, 3001) are available
+- ✅ Dependencies are properly installed
+
+If you see any errors, follow the detailed instructions provided by the script.
+
+### **5. Development Mode**
 
 Run both client and server concurrently:
 
@@ -108,7 +155,7 @@ This starts:
 - React app on `http://localhost:3000`
 - Auth server on `http://localhost:3001`
 
-### **5. Production Deployment**
+### **6. Production Deployment**
 
 ```bash
 # Build the application
