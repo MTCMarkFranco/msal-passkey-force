@@ -27,7 +27,6 @@ function App() {
   const [webAuthnSupport, setWebAuthnSupport] = useState({ supported: false, platformAvailable: false });
   const [users, setUsers] = useState([]);
   const [entraConfig, setEntraConfig] = useState(null);
-  const [expandedUsers, setExpandedUsers] = useState(new Set());
 
   useEffect(() => {
     const init = async () => {
@@ -90,50 +89,6 @@ function App() {
     } catch (error) {
       console.warn('Could not load users:', error);
     }
-  };
-
-  const deleteAllPasskeys = async (username) => {
-    if (!window.confirm(`Are you sure you want to delete ALL passkeys for "${username}"? This cannot be undone.`)) {
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-      await api.delete(`/api/users/${encodeURIComponent(username)}/passkeys`);
-      await loadUsers(); // Refresh the users list
-      setError(null);
-    } catch (error) {
-      setError(`Failed to delete passkeys: ${error.response?.data?.error || error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const deleteSpecificPasskey = async (username, credentialId) => {
-    if (!window.confirm(`Are you sure you want to delete this passkey? This cannot be undone.`)) {
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-      await api.delete(`/api/users/${encodeURIComponent(username)}/passkeys/${encodeURIComponent(credentialId)}`);
-      await loadUsers(); // Refresh the users list
-      setError(null);
-    } catch (error) {
-      setError(`Failed to delete passkey: ${error.response?.data?.error || error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const toggleUserExpanded = (username) => {
-    const newExpanded = new Set(expandedUsers);
-    if (newExpanded.has(username)) {
-      newExpanded.delete(username);
-    } else {
-      newExpanded.add(username);
-    }
-    setExpandedUsers(newExpanded);
   };
 
   // Entra ID Authentication Flow
@@ -447,61 +402,10 @@ function App() {
           ) : (
             <div className="users-grid">
               {users.map(u => (
-                <div key={u.id} className="user-card-wrapper">
-                  <div className="user-card">
-                    <div className="user-info">
-                      <strong>{u.displayName || u.username}</strong>
-                      <small>{u.username}</small>
-                      <div className="user-badges">
-                        <span className="passkey-count">{u.authenticatorCount} passkey{u.authenticatorCount !== 1 ? 's' : ''}</span>
-                      </div>
-                    </div>
-                    <div className="user-actions">
-                      {u.authenticatorCount > 0 && (
-                        <>
-                          <button 
-                            onClick={() => toggleUserExpanded(u.username)}
-                            className="expand-btn"
-                            title="Show/hide individual passkeys"
-                          >
-                            {expandedUsers.has(u.username) ? '▼' : '▶'} Passkeys
-                          </button>
-                          <button 
-                            onClick={() => deleteAllPasskeys(u.username)}
-                            className="delete-btn"
-                            disabled={isLoading}
-                            title="Delete all passkeys for this user"
-                          >
-                            🗑️ Delete All
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  {expandedUsers.has(u.username) && u.passkeys && u.passkeys.length > 0 && (
-                    <div className="passkeys-list">
-                      <h4>Individual Passkeys:</h4>
-                      {u.passkeys.map((passkey, index) => (
-                        <div key={passkey.id} className="passkey-item">
-                          <div className="passkey-info">
-                            <span className="passkey-name">{passkey.name}</span>
-                            <small>Counter: {passkey.counter}</small>
-                            {passkey.transports && passkey.transports.length > 0 && (
-                              <small>Transports: {passkey.transports.join(', ')}</small>
-                            )}
-                          </div>
-                          <button 
-                            onClick={() => deleteSpecificPasskey(u.username, passkey.id)}
-                            className="delete-passkey-btn"
-                            disabled={isLoading}
-                            title="Delete this specific passkey"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div key={u.id} className="user-card">
+                  <strong>{u.displayName || u.username}</strong>
+                  <small>{u.username}</small>
+                  <span className="passkey-count">{u.authenticatorCount} passkey{u.authenticatorCount !== 1 ? 's' : ''}</span>
                 </div>
               ))}
             </div>
@@ -650,63 +554,12 @@ function App() {
         ) : (
           <div className="users-grid">
             {users.map(u => (
-              <div key={u.id} className="user-card-wrapper">
-                <div className="user-card">
-                  <div className="user-info">
-                    <strong>{u.displayName || u.username}</strong>
-                    <small>{u.username}</small>
-                    <div className="user-badges">
-                      <span className="passkey-count">{u.authenticatorCount} passkey{u.authenticatorCount !== 1 ? 's' : ''}</span>
-                      {u.username.includes('@MngEnvMCAP490549.onmicrosoft.com') && (
-                        <span className="enterprise-badge">🏢 Enterprise</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="user-actions">
-                    {u.authenticatorCount > 0 && (
-                      <>
-                        <button 
-                          onClick={() => toggleUserExpanded(u.username)}
-                          className="expand-btn"
-                          title="Show/hide individual passkeys"
-                        >
-                          {expandedUsers.has(u.username) ? '▼' : '▶'} Passkeys
-                        </button>
-                        <button 
-                          onClick={() => deleteAllPasskeys(u.username)}
-                          className="delete-btn"
-                          disabled={isLoading}
-                          title="Delete all passkeys for this user"
-                        >
-                          🗑️ Delete All
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-                {expandedUsers.has(u.username) && u.passkeys && u.passkeys.length > 0 && (
-                  <div className="passkeys-list">
-                    <h4>Individual Passkeys:</h4>
-                    {u.passkeys.map((passkey, index) => (
-                      <div key={passkey.id} className="passkey-item">
-                        <div className="passkey-info">
-                          <span className="passkey-name">{passkey.name}</span>
-                          <small>Counter: {passkey.counter}</small>
-                          {passkey.transports && passkey.transports.length > 0 && (
-                            <small>Transports: {passkey.transports.join(', ')}</small>
-                          )}
-                        </div>
-                        <button 
-                          onClick={() => deleteSpecificPasskey(u.username, passkey.id)}
-                          className="delete-passkey-btn"
-                          disabled={isLoading}
-                          title="Delete this specific passkey"
-                        >
-                          🗑️
-                        </button>
-                      </div>
-                    ))}
-                  </div>
+              <div key={u.id} className="user-card">
+                <strong>{u.displayName || u.username}</strong>
+                <small>{u.username}</small>
+                <span className="passkey-count">{u.authenticatorCount} passkey{u.authenticatorCount !== 1 ? 's' : ''}</span>
+                {u.username.includes('@MngEnvMCAP490549.onmicrosoft.com') && (
+                  <span className="enterprise-badge">🏢 Enterprise</span>
                 )}
               </div>
             ))}

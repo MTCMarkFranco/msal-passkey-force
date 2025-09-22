@@ -1,0 +1,38 @@
+[
+  [
+    "dev@MngEnvMCAP490549.onmicrosoft.com",
+    [
+      {
+        "passkeyId": "9bbb2dfc-7db2-40fb-a605-0abdfa760347",
+        "credentialId": "5Ry5uwkS2dJqYmRo44aRXbWL3_eVxAtS6kGFNOVPj30",
+        "deviceType": "singleDevice",
+        "createdAt": "2025-09-22T00:35:35.747Z",
+        "lastUsed": "2025-09-22T00:35:35.747Z"
+      }
+    ]
+  ],
+  [
+    "marfra@MngEnvMCAP490549.onmicrosoft.com",
+    [
+      {
+        "passkeyId": "0304f35c-78ee-400b-932c-d7f3c1eae71d",
+        "credentialId": "kf0Obuv1TmcQ8OqVud_D0xGrsZyYszSr6NSYt6zEx8E",
+        "deviceType": "singleDevice",
+        "createdAt": "2025-09-22T00:47:01.664Z",
+        "lastUsed": "2025-09-22T00:47:01.665Z"
+      }
+    ]
+  ],
+  [
+    "marframfa@MngEnvMCAP490549.onmicrosoft.com",
+    [
+      {
+        "passkeyId": "f4441829-ed5e-4139-b4d0-b4b83346ad06",
+        "credentialId": "MDF0RWdEajVjYzFUektld1podzNpMmViSU1CWmY5TDkwVWgwQ3lVTlBrRQ",
+        "deviceType": "singleDevice",
+        "createdAt": "2025-09-22T00:59:10.109Z",
+        "lastUsed": "2025-09-22T00:59:10.109Z"
+      }
+    ]
+  ]
+]

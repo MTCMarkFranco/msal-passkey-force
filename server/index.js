@@ -1,694 +1,1244 @@
-/**
- * Secure Kiosk Authentication Server
- * 
- * This server implements the strongest security practices:
- * - PKCE (Proof Key for Code Exchange) for SPAs
- * - Device Code Flow for kiosk scenarios
- * - Passkey authentication support
- * - QR code generation for mobile authentication
- * - Rate limiting and security headers
- * - Proper error handling and logging
- */
-
-require('dotenv').config();
 const express = require('express');
+const session = require('express-session');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
-// MSAL no longer needed - using pure custom polling
-const QRCode = require('qrcode');
+const crypto = require('crypto');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const base64url = require('base64url');
+const { ConfidentialClientApplication } = require('@azure/msal-node');
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
+
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enhanced rate limiting for multi-user kiosk scenarios
-const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 500, // Increased for concurrent users
-  message: {
-    error: 'Too many requests from this IP, please try again later.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Skip rate limiting for local development and Azure App Service
-  skip: (req) => {
-    const isLocalDev = process.env.NODE_ENV === 'development' || 
-                      req.ip === '127.0.0.1' || 
-                      req.ip === '::1' || 
-                      req.ip?.startsWith('192.168.') ||
-                      req.ip?.startsWith('10.') ||
-                      req.hostname === 'localhost';
-    
-    const isAzureAppService = process.env.WEBSITE_NODE_DEFAULT_VERSION;
-    
-    if (isLocalDev || isAzureAppService) {
-      console.log(`[RATE LIMIT] Skipping rate limit for ${isLocalDev ? 'local dev' : 'Azure App Service'} (IP: ${req.ip})`);
-      return true;
-    }
-    return false;
-  }
-});
+// Entra ID Configuration - using your existing environment variables
+const ENTRA_CONFIG = {
+  clientId: process.env.CLIENT_ID || process.env.ENTRA_CLIENT_ID || '00000000-0000-0000-0000-000000000000',
+  clientSecret: process.env.CLIENT_SECRET || process.env.ENTRA_CLIENT_SECRET,
+  authority: `https://login.microsoftonline.com/${process.env.TENANT_ID || process.env.ENTRA_TENANT_ID || 'MngEnvMCAP490549.onmicrosoft.com'}`,
+  tenantId: process.env.TENANT_ID || process.env.ENTRA_TENANT_ID || 'MngEnvMCAP490549.onmicrosoft.com',
+  scopes: ['https://graph.microsoft.com/User.Read', 'https://graph.microsoft.com/User.ReadBasic.All']
+};
 
-// CORS configuration - only for local development
-// Azure App Service handles CORS in production
-if (!process.env.WEBSITE_NODE_DEFAULT_VERSION) {
-  const corsOptions = {
-    origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
-    credentials: true,
-    optionsSuccessStatus: 200
-  };
-  app.use(cors(corsOptions));
-  console.log('🔗 CORS enabled for local development');
+// Initialize MSAL instance for server-side validation (only if properly configured)
+let msalInstance = null;
+if (ENTRA_CONFIG.clientId && ENTRA_CONFIG.clientSecret && 
+    ENTRA_CONFIG.clientId !== '00000000-0000-0000-0000-000000000000') {
+  try {
+    msalInstance = new ConfidentialClientApplication({
+      auth: {
+        clientId: ENTRA_CONFIG.clientId,
+        clientSecret: ENTRA_CONFIG.clientSecret,
+        authority: ENTRA_CONFIG.authority,
+      }
+    });
+    console.log('✅ MSAL configured successfully for tenant:', ENTRA_CONFIG.tenantId);
+  } catch (error) {
+    console.warn('⚠️ MSAL initialization failed:', error.message);
+    console.warn('Entra ID features will be disabled');
+  }
+} else {
+  console.warn('⚠️ Entra ID not fully configured - missing CLIENT_ID or CLIENT_SECRET');
+  console.warn('Standalone passkey mode available only');
 }
 
-// Apply security middleware
+// Storage file paths
+const USERS_FILE = path.join(__dirname, 'users.json');
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
+const PASSKEY_REGISTRY_FILE = path.join(__dirname, 'passkey-registry.json');
+const CRYPTO_KEYS_FILE = path.join(__dirname, 'crypto-keys.json');
+
+// Cryptographic key management for passkey operations
+function generateOrLoadCryptoKeys() {
+  try {
+    if (fs.existsSync(CRYPTO_KEYS_FILE)) {
+      const keys = JSON.parse(fs.readFileSync(CRYPTO_KEYS_FILE, 'utf8'));
+      console.log('Loaded existing cryptographic keys');
+      return keys;
+    }
+  } catch (error) {
+    console.error('Error loading crypto keys:', error);
+  }
+
+  // Generate new keys if none exist
+  const keys = {
+    serverKeyPair: {
+      publicKey: crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+      }).publicKey,
+      privateKey: crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+      }).privateKey
+    },
+    encryptionKey: crypto.randomBytes(32).toString('hex'), // AES-256 key for data encryption
+    signingKey: crypto.randomBytes(64).toString('hex'),    // HMAC signing key
+    createdAt: new Date().toISOString()
+  };
+
+  // Save keys securely
+  fs.writeFileSync(CRYPTO_KEYS_FILE, JSON.stringify(keys, null, 2));
+  fs.chmodSync(CRYPTO_KEYS_FILE, 0o600); // Read/write for owner only
+  console.log('Generated new cryptographic keys');
+  return keys;
+}
+
+// Load passkey registry for Entra ID user mappings
+function loadPasskeyRegistry() {
+  try {
+    if (fs.existsSync(PASSKEY_REGISTRY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(PASSKEY_REGISTRY_FILE, 'utf8'));
+      const registry = new Map(data);
+      console.log(`Loaded ${registry.size} passkey registrations`);
+      return registry;
+    }
+  } catch (error) {
+    console.error('Error loading passkey registry:', error);
+  }
+  return new Map();
+}
+
+function savePasskeyRegistry(registry) {
+  try {
+    const data = Array.from(registry.entries());
+    fs.writeFileSync(PASSKEY_REGISTRY_FILE, JSON.stringify(data, null, 2));
+    console.log(`Saved ${registry.size} passkey registrations`);
+  } catch (error) {
+    console.error('Error saving passkey registry:', error);
+  }
+}
+
+// Enhanced user loading with Entra ID integration
+function loadUsers() {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+      const users = new Map();
+      for (const [key, value] of data) {
+        // Convert userIdBuffer back to Buffer if it exists
+        if (value.userIdBuffer && value.userIdBuffer.data) {
+          value.userIdBuffer = Buffer.from(value.userIdBuffer.data);
+        }
+        // Convert credentialID back to Buffer for each authenticator and validate
+        if (value.authenticators) {
+          value.authenticators = value.authenticators.filter(auth => {
+            try {
+              if (auth.credentialID && auth.credentialID.data) {
+                auth.credentialID = Buffer.from(auth.credentialID.data);
+              }
+              if (auth.credentialPublicKey && auth.credentialPublicKey.data) {
+                auth.credentialPublicKey = Buffer.from(auth.credentialPublicKey.data);
+              }
+              // Validate that we have valid credential data
+              return auth.credentialID && Buffer.isBuffer(auth.credentialID) && auth.credentialID.length > 0;
+            } catch (error) {
+              console.warn('Removing invalid authenticator:', error.message);
+              return false;
+            }
+          });
+        }
+        users.set(key, value);
+      }
+      console.log(`Loaded ${users.size} users from file`);
+      return users;
+    }
+  } catch (error) {
+    console.error('Error loading users:', error);
+  }
+  return new Map();
+}
+
+function saveUsers(users) {
+  try {
+    const data = Array.from(users.entries());
+    fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
+    console.log(`Saved ${users.size} users to file`);
+  } catch (error) {
+    console.error('Error saving users:', error);
+  }
+}
+
+function loadSessions() {
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+      const sessions = new Map(data);
+      console.log(`Loaded ${sessions.size} sessions from file`);
+      return sessions;
+    }
+  } catch (error) {
+    console.error('Error loading sessions:', error);
+  }
+  return new Map();
+}
+
+function saveSessions(sessions) {
+  try {
+    const data = Array.from(sessions.entries());
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error('Error saving sessions:', error);
+  }
+}
+
+// Initialize cryptographic keys and storage
+const cryptoKeys = generateOrLoadCryptoKeys();
+const passkeyRegistry = loadPasskeyRegistry(); // Maps Entra ID users to passkeys
+const users = loadUsers();
+const userSessions = loadSessions();
+
+// Utility functions for data encryption (for sensitive local storage)
+function encryptData(data) {
+  const cipher = crypto.createCipher('aes-256-cbc', cryptoKeys.encryptionKey);
+  let encrypted = cipher.update(JSON.stringify(data), 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return encrypted;
+}
+
+function decryptData(encryptedData) {
+  try {
+    const decipher = crypto.createDecipher('aes-256-cbc', cryptoKeys.encryptionKey);
+    let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  } catch (error) {
+    console.error('Decryption error:', error);
+    return null;
+  }
+}
+
+// Enhanced Entra ID user validation
+async function validateEntraIdUser(accessToken) {
+  if (!msalInstance) {
+    throw new Error('Entra ID not configured - MSAL instance unavailable');
+  }
+
+  try {
+    // In a real implementation, you would validate the token with Microsoft Graph
+    // For now, we'll simulate this validation
+    console.log('Validating Entra ID access token...');
+    
+    // Decode token to get user info (simplified - use proper JWT validation in production)
+    const tokenParts = accessToken.split('.');
+    if (tokenParts.length !== 3) {
+      throw new Error('Invalid token format');
+    }
+    
+    // This is a placeholder - implement proper JWT validation
+    const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64').toString());
+    
+    // Validate that the token is for our tenant
+    if (payload.tid && payload.tid !== ENTRA_CONFIG.tenantId && 
+        !payload.upn?.endsWith('@MngEnvMCAP490549.onmicrosoft.com')) {
+      throw new Error('Token not for authorized tenant');
+    }
+    
+    return {
+      userId: payload.sub || payload.oid,
+      userPrincipalName: payload.upn || payload.preferred_username,
+      displayName: payload.name,
+      email: payload.email || payload.upn,
+      tenantId: payload.tid
+    };
+  } catch (error) {
+    console.error('Entra ID validation error:', error);
+    throw new Error('Invalid Entra ID token');
+  }
+}
+
+// WebAuthn configuration
+const rpID = process.env.RP_ID || 'localhost';
+const rpName = process.env.RP_NAME || 'Secure Kiosk App';
+const origin = process.env.ORIGIN || `http://localhost:${PORT}`;
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+});
+
+// Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'", "https://login.microsoftonline.com"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"],
     },
   },
 }));
 
 app.use(limiter);
+app.use(cors({
+  origin: origin,
+  credentials: true
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Pure Custom Device Code Flow - No MSAL dependency
-// We make direct HTTP requests to Microsoft's OAuth endpoints for complete control
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
 
-// In-memory store for device code sessions (use Redis in production)
-const deviceCodeSessions = new Map();
+// Serve static files from the dist directory
+app.use(express.static(path.join(__dirname, '../dist')));
 
-// ================== SESSION PERSISTENCE ==================
-const fs = require('fs').promises;
-
-const SESSION_FILE = path.join(__dirname, '.sessions.json');
-
-// Load sessions from file on startup
-async function loadSessions() {
-    try {
-        const data = await fs.readFile(SESSION_FILE, 'utf8');
-        const sessions = JSON.parse(data);
-        console.log(`[SESSION] Loaded ${Object.keys(sessions).length} sessions from disk`);
-        
-        // Restore sessions to Map and restart polling for active sessions
-        for (const [sessionId, session] of Object.entries(sessions)) {
-            deviceCodeSessions.set(sessionId, session);
-            
-            // Restart server-side polling for pending sessions that haven't expired
-            if (session.status === 'pending' && session.expiresAt > Date.now()) {
-                console.log(`[SESSION] Resuming polling for session ${sessionId}`);
-                startServerSidePolling(sessionId, session);
-            }
-        }
-    } catch (error) {
-        if (error.code !== 'ENOENT') {
-            console.error('[SESSION] Error loading sessions:', error);
-        }
-    }
-}
-
-// Save sessions to file
-async function saveSessions() {
-    try {
-        const sessions = Object.fromEntries(deviceCodeSessions);
-        await fs.writeFile(SESSION_FILE, JSON.stringify(sessions, null, 2));
-    } catch (error) {
-        console.error('[SESSION] Error saving sessions:', error);
-    }
-}
-
-// Auto-save sessions periodically and on changes
-setInterval(saveSessions, 30000); // Save every 30 seconds
-
-// Save on process exit
-process.on('SIGINT', async () => {
-    console.log('[SESSION] Saving sessions before exit...');
-    await saveSessions();
-    process.exit(0);
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+    entraIdConfigured: !!ENTRA_CONFIG.clientId && ENTRA_CONFIG.clientId !== '00000000-0000-0000-0000-000000000000',
+    passkeyRegistrations: passkeyRegistry.size,
+    totalUsers: users.size
+  });
 });
 
-process.on('SIGTERM', async () => {
-    console.log('[SESSION] Saving sessions before exit...');
-    await saveSessions();
-    process.exit(0);
-});
-
-// Session metrics for monitoring concurrent users
-const sessionMetrics = {
-  totalSessions: 0,
-  activeSessions: 0,
-  completedSessions: 0,
-  failedSessions: 0,
-  getActiveSessionCount: () => {
-    let active = 0;
-    for (const session of deviceCodeSessions.values()) {
-      if (session.status === 'pending') active++;
-    }
-    return active;
-  },
-  logMetrics: () => {
-    const active = sessionMetrics.getActiveSessionCount();
-    console.log(`[METRICS] Active: ${active}, Total: ${sessionMetrics.totalSessions}, Completed: ${sessionMetrics.completedSessions}, Failed: ${sessionMetrics.failedSessions}`);
-  }
-};
-
-// Clean up expired sessions every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  let cleaned = 0;
-  
-  for (const [sessionId, session] of deviceCodeSessions.entries()) {
-    const sessionAge = (now - session.timestamp) / 1000;
-    if (sessionAge > 86400) { // Remove sessions older than 24 hours (86400 seconds)
-      deviceCodeSessions.delete(sessionId);
-      cleaned++;
-    }
-  }
-  
-  if (cleaned > 0) {
-    console.log(`[CLEANUP] Removed ${cleaned} sessions older than 24 hours`);
-  }
-}, 300000); // Run every 5 minutes
-
-// Server-side polling function to avoid race conditions
-const startServerSidePolling = (sessionId, session) => {
-  // Use random interval between 7-10 seconds regardless of Microsoft's suggested interval
-  const getRandomPollInterval = () => {
-    return (7 + Math.random() * 3) * 1000; // Random between 7000-10000ms (7-10 seconds)
-  };
-  
-  const poll = async () => {
-    try {
-      const currentSession = deviceCodeSessions.get(sessionId);
-      if (!currentSession || currentSession.processed || currentSession.status !== 'pending') {
-        console.log(`[SERVER POLL] Stopping polling for session ${sessionId}: ${currentSession?.status || 'not found'}`);
-        return; // Stop polling
-      }
-
-      console.log(`[SERVER POLL] Checking token for session ${sessionId}`);
-      
-      const tokenResponse = await fetch(currentSession.tokenEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: new URLSearchParams({
-          grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-          client_id: currentSession.clientId,
-          device_code: currentSession.deviceCode
-        })
-      });
-
-      const tokenData = await tokenResponse.json();
-
-      if (tokenResponse.ok) {
-        // Success - user completed authentication
-        console.log(`[SERVER POLL] Authentication successful for session: ${sessionId}`);
-        currentSession.processed = true;
-        currentSession.status = 'completed';
-        sessionMetrics.completedSessions++;
-        
-        // Save sessions after authentication completion
-        saveSessions().catch(console.error);
-        
-        currentSession.authResult = {
-          accessToken: tokenData.access_token,
-          idToken: tokenData.id_token,
-          tokenType: tokenData.token_type,
-          scopes: currentSession.scopes,
-          expiresOn: new Date(Date.now() + (tokenData.expires_in * 1000)),
-          account: (() => {
-            let tokenPayload = null;
-            try {
-              tokenPayload = tokenData.id_token ? JSON.parse(Buffer.from(tokenData.id_token.split('.')[1], 'base64').toString()) : null;
-            } catch (e) {
-              console.warn(`[SERVER POLL] Failed to parse ID token for session ${sessionId}:`, e);
-            }
-            
-            return {
-              homeAccountId: tokenData.client_info ? Buffer.from(tokenData.client_info, 'base64').toString() : sessionId,
-              environment: 'login.microsoftonline.com',
-              tenantId: tokenPayload?.tid || 'unknown',
-              username: tokenPayload?.preferred_username || tokenPayload?.upn || 'unknown',
-              name: tokenPayload?.name || 'Unknown User'
-            };
-          })()
-        };
-        return; // Stop polling
-      } else if (tokenData.error === 'authorization_pending') {
-        // User hasn't completed authentication yet - continue polling
-        const nextPollInterval = getRandomPollInterval();
-        console.log(`[SERVER POLL] Session ${sessionId} still pending - next poll in ${Math.round(nextPollInterval/1000)}s`);
-        setTimeout(poll, nextPollInterval);
-      } else if (tokenData.error === 'authorization_declined') {
-        console.log(`[SERVER POLL] Session ${sessionId} declined by user`);
-        currentSession.processed = true;
-        currentSession.status = 'failed';
-        currentSession.error = 'Authentication declined by user';
-        sessionMetrics.failedSessions++;
-        saveSessions().catch(console.error);
-        return; // Stop polling
-      } else if (tokenData.error === 'expired_token') {
-        console.log(`[SERVER POLL] Session ${sessionId} expired`);
-        currentSession.processed = true;
-        currentSession.status = 'failed';
-        currentSession.error = 'Device code expired';
-        sessionMetrics.failedSessions++;
-        saveSessions().catch(console.error);
-        return; // Stop polling
-      } else {
-        console.error(`[SERVER POLL] Session ${sessionId} failed:`, tokenData.error_description || tokenData.error);
-        currentSession.processed = true;
-        currentSession.status = 'failed';
-        currentSession.error = tokenData.error_description || tokenData.error;
-        sessionMetrics.failedSessions++;
-        saveSessions().catch(console.error);
-        return; // Stop polling
-      }
-    } catch (error) {
-      console.error(`[SERVER POLL] Error polling session ${sessionId}:`, error);
-      // Continue polling on network errors with random interval
-      const nextPollInterval = getRandomPollInterval();
-      console.log(`[SERVER POLL] Retrying session ${sessionId} in ${Math.round(nextPollInterval/1000)}s due to error`);
-      setTimeout(poll, nextPollInterval);
-    }
-  };
-
-  // Start polling after the initial random interval
-  const initialPollInterval = getRandomPollInterval();
-  console.log(`[SERVER POLL] Starting polling for session ${sessionId} - first poll in ${Math.round(initialPollInterval/1000)}s`);
-  setTimeout(poll, initialPollInterval);
-};
+// Entra ID Integration Endpoints
 
 /**
- * Device Code Authentication Flow for Kiosk - Server-Side Polling
- * This implements the strongest security for kiosk scenarios with server-side polling to avoid race conditions
+ * Get Entra ID configuration for frontend
  */
-app.post('/auth/device-code/start', async (req, res) => {
-  try {
-    const sessionId = uuidv4();
-    const scopes = process.env.DEFAULT_SCOPES?.split(',') || ['openid', 'profile', 'User.Read'];
-
-    console.log(`[AUTH] Starting server-side polled device code flow for session: ${sessionId}`);
-    console.log(`[AUTH] Request IP: ${req.ip}, Headers: ${JSON.stringify(req.headers['x-forwarded-for'] || 'none')}`);
-    console.log(`[AUTH] Environment: ${process.env.NODE_ENV}, Azure: ${!!process.env.WEBSITE_NODE_DEFAULT_VERSION}`);
-    
-    // Update session metrics
-    sessionMetrics.totalSessions++;
-    sessionMetrics.logMetrics();
-
-    // Make direct request to Microsoft's device code endpoint
-    const clientId = process.env.CLIENT_ID;
-    const tenantId = process.env.TENANT_ID || 'common';
-    const authority = `https://login.microsoftonline.com/${tenantId}`;
-    
-    const deviceCodeEndpoint = `${authority}/oauth2/v2.0/devicecode`;
-    const tokenEndpoint = `${authority}/oauth2/v2.0/token`;
-
-    console.log(`[DEBUG] Device code request to: ${deviceCodeEndpoint}`);
-    console.log(`[DEBUG] Using client_id: ${clientId}`);
-    console.log(`[DEBUG] Using scopes: ${scopes.join(' ')}`);
-
-    // Step 1: Get device code from Microsoft
-    const deviceCodeResponse = await fetch(deviceCodeEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        client_id: clientId,
-        scope: scopes.join(' ')
-      })
-    });
-
-    if (!deviceCodeResponse.ok) {
-      const errorText = await deviceCodeResponse.text();
-      throw new Error(`Device code request failed: ${deviceCodeResponse.status} ${errorText}`);
-    }
-
-    const deviceCodeData = await deviceCodeResponse.json();
-    
-    console.log(`[DEVICE CODE] Full response:`, JSON.stringify(deviceCodeData, null, 2));
-    console.log(`[DEVICE CODE] User code: ${deviceCodeData.user_code}`);
-    console.log(`[DEVICE CODE] Device code expires in: ${deviceCodeData.expires_in} seconds`);
-    console.log(`[DEVICE CODE] Polling interval: ${deviceCodeData.interval} seconds`);
-
-    // Store session data for server-side polling
-    const session = {
-      deviceCode: deviceCodeData.device_code,
-      userCode: deviceCodeData.user_code,
-      verificationUri: deviceCodeData.verification_uri,
-      expiresIn: deviceCodeData.expires_in,
-      interval: deviceCodeData.interval,
-      message: deviceCodeData.message,
-      timestamp: Date.now(),
-      expiresAt: Date.now() + (deviceCodeData.expires_in * 1000), // Add expiration timestamp
-      status: 'pending',
-      processed: false,
-      // Store endpoints for server-side polling
-      tokenEndpoint: tokenEndpoint,
-      clientId: clientId,
-      scopes: scopes
-    };
-
-    deviceCodeSessions.set(sessionId, session);
-    
-    // Save sessions after creating new session
-    saveSessions().catch(console.error);
-    
-    // Start server-side polling
-    console.log(`[AUTH] Starting server-side polling for session ${sessionId}`);
-    startServerSidePolling(sessionId, session);
-
-    // Don't store the promise to avoid conflicts with MSAL's internal polling
-
-    // Generate QR Code for mobile authentication
-    console.log(`[QR CODE] Generating QR code for session: ${sessionId}`);
-    // Use Microsoft's official verification URI from the response
-    // This ensures compatibility and redirects to the correct tenant-specific page
-    const qrCodeData = session.verificationUri;
-    console.log(`[QR CODE] QR data: ${qrCodeData}`);
-    
-    let qrCodeSvg;
-    try {
-      qrCodeSvg = await QRCode.toString(qrCodeData, { 
-        type: 'svg',
-        width: 256,
-        margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#FFFFFF'
-        }
-      });
-      console.log(`[QR CODE] QR code generated successfully for session: ${sessionId}`);
-    } catch (qrError) {
-      console.error(`[QR CODE] Failed to generate QR code for session ${sessionId}:`, qrError);
-      throw new Error(`QR code generation failed: ${qrError.message}`);
-    }
-
-    const responseData = {
-      sessionId,
-      userCode: session.userCode,
-      verificationUri: session.verificationUri, // Use Microsoft's official verification URI for everything
-      qrCode: qrCodeSvg,
-      message: session.message,
-      expiresIn: session.expiresIn,
-      interval: session.interval // Include polling interval for frontend
-    };
-
-    console.log(`[AUTH] Sending response for session ${sessionId}:`, {
-      ...responseData,
-      qrCode: qrCodeSvg ? '[QR_CODE_GENERATED]' : '[QR_CODE_MISSING]'
-    });
-
-    res.json(responseData);
-
-  } catch (error) {
-    console.error('[AUTH] Device code initialization failed:', error);
-    res.status(500).json({
-      error: 'Authentication initialization failed',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-    });
-  }
+app.get('/api/auth/entra-config', (req, res) => {
+  res.json({
+    clientId: ENTRA_CONFIG.clientId,
+    authority: ENTRA_CONFIG.authority,
+    tenantId: ENTRA_CONFIG.tenantId,
+    scopes: ENTRA_CONFIG.scopes,
+    redirectUri: `${origin}/auth/callback`
+  });
 });
 
 /**
- * Poll for authentication status with pure custom polling
- * This endpoint polls Microsoft's token endpoint directly when status is pending
+ * Validate Entra ID token and prepare for passkey registration
  */
-// Status check endpoint - returns server-side polling results
-app.get('/auth/device-code/status/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const session = deviceCodeSessions.get(sessionId);
-
-    console.log(`[AUTH] Status check for session ${sessionId}: ${session ? session.status : 'NOT_FOUND'}`);
-
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Check if session expired
-    const now = Date.now();
-    const sessionAge = (now - session.timestamp) / 1000; // seconds
-    if (sessionAge > session.expiresIn) {
-      console.log(`[AUTH] Session ${sessionId} expired (age: ${sessionAge}s, expires: ${session.expiresIn}s)`);
-      // Don't delete immediately if completed to allow client to retrieve result
-      if (session.status !== 'completed') {
-        deviceCodeSessions.delete(sessionId);
-      }
-      return res.json({ status: 'expired' });
-    }
-
-    // Return status without sensitive data (updated by server-side polling)
-    const response = {
-      status: session.status,
-      userCode: session.userCode,
-      expiresIn: Math.max(0, session.expiresIn - sessionAge),
-      interval: session.interval,
-      ...(session.status === 'completed' && session.authResult ? {
-        user: {
-          name: session.authResult.account.name,
-          username: session.authResult.account.username,
-          homeAccountId: session.authResult.account.homeAccountId
-        }
-      } : {}),
-      ...(session.status === 'failed' ? {
-        error: session.error
-      } : {})
-    };
-
-    console.log(`[AUTH] Returning status for ${sessionId}:`, response.status);
-    res.json(response);
-
-  } catch (error) {
-    console.error('[AUTH] Status check failed:', error);
-    res.status(500).json({ error: 'Status check failed' });
-  }
-});
-
-/**
- * Get authentication token for API calls
- * Only returns token if authentication completed successfully
- */
-app.get('/auth/token/:sessionId', (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const session = deviceCodeSessions.get(sessionId);
-
-    if (!session || session.status !== 'completed' || !session.authResult) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-
-    // Return token for API calls (consider implementing token refresh)
-    res.json({
-      accessToken: session.authResult.accessToken,
-      tokenType: 'Bearer',
-      scopes: session.authResult.scopes,
-      expiresOn: session.authResult.expiresOn
-    });
-
-  } catch (error) {
-    console.error('[AUTH] Token retrieval failed:', error);
-    res.status(500).json({ error: 'Token retrieval failed' });
-  }
-});
-
-/**
- * Token validation endpoint for silent login
- * Validates an access token by calling Microsoft Graph
- */
-app.post('/auth/validate-token', async (req, res) => {
+app.post('/api/auth/entra-validate', async (req, res) => {
   try {
     const { accessToken } = req.body;
     
     if (!accessToken) {
-      return res.status(400).json({ error: 'Access token required' });
+      return res.status(400).json({ error: 'Access token is required' });
+    }
+
+    // Validate the Entra ID token
+    const entraUser = await validateEntraIdUser(accessToken);
+    
+    console.log('Validated Entra ID user:', {
+      userPrincipalName: entraUser.userPrincipalName,
+      displayName: entraUser.displayName,
+      userId: entraUser.userId
+    });
+
+    // Store validated Entra ID info in session for passkey registration
+    req.session.entraUser = entraUser;
+    req.session.entraToken = accessToken;
+    
+    // Check if user already has passkeys registered
+    const existingPasskeys = passkeyRegistry.get(entraUser.userPrincipalName) || [];
+    
+    res.json({
+      validated: true,
+      user: {
+        userPrincipalName: entraUser.userPrincipalName,
+        displayName: entraUser.displayName,
+        email: entraUser.email
+      },
+      hasPasskeys: existingPasskeys.length > 0,
+      passkeyCount: existingPasskeys.length
+    });
+  } catch (error) {
+    console.error('Entra ID validation error:', error);
+    res.status(401).json({ error: 'Invalid Entra ID token', details: error.message });
+  }
+});
+
+// WebAuthn Registration Endpoints
+
+/**
+ * Generate registration options for a new passkey (Enhanced with Entra ID)
+ */
+app.post('/api/webauthn/generate-registration-options', async (req, res) => {
+  try {
+    const { username, displayName, useEntraId = false } = req.body;
+    console.log('Registration request:', { username, displayName, useEntraId });
+
+    // Enhanced validation for Entra ID users
+    if (useEntraId) {
+      if (!req.session.entraUser) {
+        return res.status(401).json({ 
+          error: 'Entra ID authentication required. Please authenticate with Entra ID first.' 
+        });
+      }
+      
+      // Use Entra ID user info
+      const entraUser = req.session.entraUser;
+      const effectiveUsername = entraUser.userPrincipalName;
+      const effectiveDisplayName = entraUser.displayName;
+      
+      console.log('Using Entra ID user for passkey registration:', {
+        userPrincipalName: effectiveUsername,
+        displayName: effectiveDisplayName
+      });
+    } else {
+      if (!username) {
+        return res.status(400).json({ error: 'Username is required' });
+      }
+    }
+
+    const finalUsername = useEntraId ? req.session.entraUser.userPrincipalName : username;
+    const finalDisplayName = useEntraId ? req.session.entraUser.displayName : (displayName || username);
+
+    // Create or get user
+    let user = users.get(finalUsername);
+    let needsUserIdUpdate = false;
+    
+    // Check if existing user has an invalid (too long) user ID
+    if (user && user.userIdBuffer && user.userIdBuffer.length > 64) {
+      console.log(`Existing user has invalid user ID length (${user.userIdBuffer.length}). Regenerating...`);
+      needsUserIdUpdate = true;
     }
     
-    console.log('[TOKEN-VALIDATE] Validating token...');
-    
-    // Try to call Microsoft Graph to validate the token
-    const graphResponse = await fetch('https://graph.microsoft.com/v1.0/me', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
+    if (!user || needsUserIdUpdate) {
+      const userId = uuidv4();
+      // Create a secure userHandle for Entra ID users (max 64 characters for WebAuthn)
+      let userHandleString;
+      if (useEntraId && req.session.entraUser && req.session.entraUser.userId) {
+        // For Entra ID users, create a deterministic short handle from the user ID
+        const crypto = require('crypto');
+        const entraUserId = req.session.entraUser.userId.toString();
+        // Create a short hash of the Entra ID to ensure uniqueness and stay under 64 chars
+        const hash = crypto.createHash('sha256').update(entraUserId).digest('hex').slice(0, 20);
+        userHandleString = `ent_${hash}`;
+      } else {
+        // For regular users, use a truncated UUID (remove dashes to save space)
+        userHandleString = userId.replace(/-/g, '').slice(0, 32);
+      }
+      
+      // Ensure user ID is within WebAuthn limits (1-64 characters)
+      if (userHandleString.length === 0 || userHandleString.length > 64) {
+        console.error('Invalid user handle generated:', {
+          userHandleString,
+          length: userHandleString.length,
+          useEntraId,
+          entraUserId: req.session.entraUser?.userId
+        });
+        throw new Error(`Invalid user ID length: ${userHandleString.length}. Must be 1-64 characters.`);
+      }
+      
+      const userIdBuffer = Buffer.from(userHandleString, 'utf-8');
+      
+      console.log('Generated user handle:', {
+        userHandleString,
+        length: userHandleString.length,
+        bufferLength: userIdBuffer.length,
+        useEntraId,
+        withinLimits: userIdBuffer.length <= 64
+      });
+      
+      // Double-check that the buffer is within WebAuthn limits
+      if (userIdBuffer.length > 64) {
+        throw new Error(`User ID buffer too long: ${userIdBuffer.length} bytes. WebAuthn limit is 64 bytes.`);
+      }
+      
+      user = {
+        id: userId,
+        userIdBuffer: userIdBuffer,
+        userHandleString: userHandleString,
+        username: finalUsername,
+        displayName: finalDisplayName,
+        authenticators: [],
+        entraId: useEntraId ? {
+          userId: req.session.entraUser.userId,
+          userPrincipalName: req.session.entraUser.userPrincipalName,
+          tenantId: req.session.entraUser.tenantId,
+          registeredAt: new Date().toISOString()
+        } : null,
+        createdAt: new Date().toISOString()
+      };
+      
+      users.set(finalUsername, user);
+      saveUsers(users); // Persist to file
+      
+      console.log('Created new user:', { 
+        id: user.id, 
+        username: user.username, 
+        userHandle: userHandleString,
+        entraId: !!user.entraId 
+      });
+    } else {
+      console.log('Found existing user:', { id: user.id, username: user.username });
+    }
+
+    console.log('User ID buffer type:', typeof user.userIdBuffer);
+    console.log('User ID buffer constructor:', user.userIdBuffer.constructor.name);
+    console.log('User ID buffer length:', user.userIdBuffer.length);
+
+    // Enhanced security options for Entra ID users
+    const isEntraIdUser = !!user.entraId;
+    const options = await generateRegistrationOptions({
+      rpName: `${rpName}${isEntraIdUser ? ' (Enterprise)' : ''}`,
+      rpID,
+      userID: user.userIdBuffer,
+      userName: user.username,
+      userDisplayName: user.displayName,
+      attestationType: isEntraIdUser ? 'direct' : 'none', // Enhanced attestation for enterprise users
+      excludeCredentials: user.authenticators
+        .filter(authenticator => {
+          // Filter out authenticators with invalid credentialIDs
+          return authenticator.credentialID && 
+                 (Buffer.isBuffer(authenticator.credentialID) || 
+                  (typeof authenticator.credentialID === 'string' && authenticator.credentialID.length > 0));
+        })
+        .map(authenticator => ({
+          id: authenticator.credentialID,
+          type: 'public-key',
+          transports: authenticator.transports || ['internal', 'hybrid'],
+        })),
+      authenticatorSelection: {
+        authenticatorAttachment: isEntraIdUser ? 'platform' : 'cross-platform', // Prefer platform auth for enterprise
+        userVerification: isEntraIdUser ? 'required' : 'preferred', // Require verification for enterprise
+        residentKey: 'required', // Always require resident keys for better security
+        requireResidentKey: true
+      },
+      supportedAlgorithmIDs: [-7, -257, -37, -38, -39], // Extended algorithm support
+      extensions: {
+        // Enhanced security extensions for enterprise users
+        credProps: true,
+        ...(isEntraIdUser && { 
+          uvm: true, // User Verification Methods
+          credentialHints: ['client-device', 'hybrid'] 
+        })
       }
     });
+
+    console.log('Generated registration options successfully', {
+      enterprise: isEntraIdUser,
+      userVerification: options.authenticatorSelection?.userVerification,
+      residentKey: options.authenticatorSelection?.residentKey
+    });
+
+    // Store challenge and user info in session with enhanced metadata
+    req.session.currentChallenge = options.challenge;
+    req.session.currentUser = finalUsername;
+    req.session.isEntraIdRegistration = isEntraIdUser;
     
-    if (graphResponse.ok) {
-      const userData = await graphResponse.json();
-      console.log('[TOKEN-VALIDATE] Token is valid');
+    console.log('Stored challenge in session:', options.challenge);
+    console.log('Stored user in session:', finalUsername);
+    console.log('Entra ID registration:', isEntraIdUser);
+
+    res.json({
+      ...options,
+      enterpriseMode: isEntraIdUser,
+      userInfo: {
+        username: user.username,
+        displayName: user.displayName,
+        entraId: isEntraIdUser
+      }
+    });
+  } catch (error) {
+    console.error('Registration options error:', error);
+    res.status(500).json({ error: 'Failed to generate registration options' });
+  }
+});
+
+/**
+ * Verify registration response and complete passkey registration
+ */
+app.post('/api/webauthn/verify-registration', async (req, res) => {
+  try {
+    const body = req.body; // Use req.body directly instead of destructuring
+    console.log('Registration verification request:', JSON.stringify(body, null, 2));
+    
+    const expectedChallenge = req.session.currentChallenge;
+    const username = req.session.currentUser;
+
+    console.log('Expected challenge:', expectedChallenge);
+    console.log('Current user:', username);
+
+    if (!expectedChallenge || !username) {
+      console.log('Missing challenge or username in session');
+      return res.status(400).json({ error: 'No active registration session' });
+    }
+
+    const user = users.get(username);
+    if (!user) {
+      console.log('User not found:', username);
+      return res.status(400).json({ error: 'User not found' });
+    }
+
+    const verification = await verifyRegistrationResponse({
+      response: body,
+      expectedChallenge,
+      expectedOrigin: origin,
+      expectedRPID: rpID,
+      requireUserVerification: false,
+    });
+
+    const { verified, registrationInfo } = verification;
+
+    if (verified && registrationInfo) {
+      // Extract from registrationInfo.credential object (correct structure for @simplewebauthn/server)
+      const credential = registrationInfo.credential;
+      const credentialID = credential?.id;
+      const credentialPublicKey = credential?.publicKey;  
+      const counter = credential?.counter || 0;
+      const { credentialDeviceType, credentialBackedUp } = registrationInfo;
+
+      console.log('Registration verification successful!');
+      console.log('Registration info keys:', Object.keys(registrationInfo));
+      console.log('🔍 FULL registrationInfo object:', JSON.stringify(registrationInfo, null, 2));
+      console.log('🔍 CREDENTIAL object keys:', credential ? Object.keys(credential) : 'credential is undefined');
+      console.log('🔍 CREDENTIAL object:', credential);
+      console.log('Credential ID from credential object:', credentialID);
+      console.log('Credential ID type:', typeof credentialID);
+      console.log('Credential ID constructor:', credentialID ? credentialID.constructor.name : 'undefined');
+      console.log('🔍 DEBUGGING - credentialPublicKey from credential:', credentialPublicKey);
+      console.log('🔍 DEBUGGING - credentialPublicKey type:', typeof credentialPublicKey);
+      console.log('🔍 DEBUGGING - counter from credential:', counter);
+      console.log('🔍 DEBUGGING - counter type:', typeof counter);
+
+      // Check if credentialID is missing and try to get it from the body
+      let finalCredentialID = credentialID;
+      if (!finalCredentialID && body.rawId) {
+        console.log('Using rawId as credential ID');
+        finalCredentialID = Buffer.from(body.rawId, 'base64url');
+      }
+
+      if (!finalCredentialID) {
+        console.error('No credential ID found in registration response');
+        return res.status(400).json({ error: 'Missing credential ID in registration response' });
+      }
+
+      // Enhanced authenticator data for Entra ID users
+      const isEntraIdRegistration = req.session.isEntraIdRegistration;
+      const passkeyId = uuidv4();
       
-      return res.json({
-        valid: true,
-        user: {
-          name: userData.displayName,
-          username: userData.userPrincipalName,
-          id: userData.id
+      const newAuthenticator = {
+        id: passkeyId,
+        credentialID: finalCredentialID,
+        credentialPublicKey,
+        counter,
+        credentialDeviceType,
+        credentialBackedUp,
+        transports: body.response.transports || [],
+        createdAt: new Date().toISOString(),
+        // Enhanced metadata for enterprise users
+        ...(isEntraIdRegistration && {
+          entraIdMetadata: {
+            registeredByTenant: req.session.entraUser?.tenantId,
+            registeredByUser: req.session.entraUser?.userId,
+            attestationType: registrationInfo.attestationObject ? 'direct' : 'none',
+            deviceTrust: credentialBackedUp ? 'synced' : 'device-bound'
+          }
+        }),
+        // Encrypt sensitive data for local storage
+        encryptedMetadata: encryptData({
+          userAgent: req.get('User-Agent'),
+          ipAddress: req.ip,
+          registrationTimestamp: Date.now(),
+          sessionId: req.sessionID
+        })
+      };
+
+      user.authenticators.push(newAuthenticator);
+      users.set(username, user);
+      saveUsers(users); // Persist to file
+      
+      // Update passkey registry for Entra ID users
+      if (isEntraIdRegistration && req.session.entraUser) {
+        const userPasskeys = passkeyRegistry.get(req.session.entraUser.userPrincipalName) || [];
+        userPasskeys.push({
+          passkeyId: passkeyId,
+          credentialId: Buffer.isBuffer(finalCredentialID) ? finalCredentialID.toString('base64url') : base64url.encode(finalCredentialID),
+          deviceType: credentialDeviceType,
+          createdAt: new Date().toISOString(),
+          lastUsed: new Date().toISOString()
+        });
+        passkeyRegistry.set(req.session.entraUser.userPrincipalName, userPasskeys);
+        savePasskeyRegistry(passkeyRegistry);
+        
+        console.log('Updated passkey registry for Entra ID user:', req.session.entraUser.userPrincipalName);
+      }
+      
+      console.log('Stored authenticator with credential ID:', newAuthenticator.credentialID);
+      console.log('Total authenticators for user:', user.authenticators.length);
+      console.log('Enterprise registration:', isEntraIdRegistration);
+
+      // Clear session data
+      delete req.session.currentChallenge;
+      delete req.session.currentUser;
+      delete req.session.isEntraIdRegistration;
+
+      res.json({ 
+        verified: true, 
+        message: 'Passkey registered successfully',
+        passkeyInfo: {
+          id: passkeyId,
+          deviceType: credentialDeviceType,
+          backedUp: credentialBackedUp,
+          transports: body.response.transports || [],
+          enterpriseMode: isEntraIdRegistration,
+          userVerification: registrationInfo.userVerified
+        },
+        userInfo: {
+          username: user.username,
+          displayName: user.displayName,
+          totalPasskeys: user.authenticators.length,
+          entraIdLinked: !!user.entraId
         }
       });
     } else {
-      console.log('[TOKEN-VALIDATE] Token is invalid:', graphResponse.status);
-      return res.json({ valid: false });
+      res.status(400).json({ error: 'Registration verification failed', verified });
     }
-    
   } catch (error) {
-    console.error('[TOKEN-VALIDATE] Validation failed:', error);
-    res.json({ valid: false });
+    console.error('Registration verification error:', error);
+    res.status(500).json({ error: 'Registration verification failed' });
   }
 });
 
+// WebAuthn Authentication Endpoints
+
 /**
- * Logout endpoint
- * Cleans up session and provides logout URL
+ * Generate authentication options for passkey login
  */
-app.post('/auth/logout/:sessionId', (req, res) => {
+app.post('/api/webauthn/generate-authentication-options', async (req, res) => {
   try {
-    const { sessionId } = req.params;
-    console.log(`[LOGOUT] Processing logout for session: ${sessionId}`);
-    
-    const session = deviceCodeSessions.get(sessionId);
-    console.log(`[LOGOUT] Session found: ${!!session}, Total sessions before cleanup: ${deviceCodeSessions.size}`);
+    const { username } = req.body;
 
-    // Clean up session
-    deviceCodeSessions.delete(sessionId);
-    console.log(`[LOGOUT] Session cleaned up, Total sessions after cleanup: ${deviceCodeSessions.size}`);
+    let allowCredentials = [];
 
-    // Provide logout URL for complete sign-out
-    const logoutUrl = `https://login.microsoftonline.com/${process.env.TENANT_ID}/oauth2/v2.0/logout?post_logout_redirect_uri=${encodeURIComponent(process.env.POST_LOGOUT_REDIRECT_URI || `http://localhost:${PORT}`)}`;
+    if (username) {
+      // User-specific authentication
+      const user = users.get(username);
+      if (user) {
+        allowCredentials = user.authenticators.map(authenticator => ({
+          id: authenticator.credentialID,
+          type: 'public-key',
+          transports: authenticator.transports,
+        }));
+      }
+    }
 
-    const responseData = {
-      success: true,
-      logoutUrl,
-      message: 'Logged out successfully'
-    };
+    const options = await generateAuthenticationOptions({
+      timeout: 60000,
+      allowCredentials,
+      userVerification: 'preferred',
+      rpID,
+    });
 
-    console.log(`[LOGOUT] Logout successful for session ${sessionId}`);
-    res.json(responseData);
+    // Store challenge in session
+    req.session.currentChallenge = options.challenge;
+    if (username) {
+      req.session.currentUser = username;
+    }
 
+    res.json(options);
   } catch (error) {
-    console.error('[AUTH] Logout failed:', error);
-    res.status(500).json({ error: 'Logout failed' });
+    console.error('Authentication options error:', error);
+    res.status(500).json({ error: 'Failed to generate authentication options' });
   }
 });
 
-// Serve React app - static files and SPA routing
-const staticPath = path.join(__dirname, '../dist');
-console.log(`📂 Serving static files from: ${staticPath}`);
+/**
+ * Verify authentication response and complete passkey login
+ */
+app.post('/api/webauthn/verify-authentication', async (req, res) => {
+  try {
+    const body = req.body;
+    console.log('Authentication request body:', JSON.stringify(body, null, 2));
+    
+    const expectedChallenge = req.session.currentChallenge;
 
-// Serve static files with proper caching headers
-app.use(express.static(staticPath, {
-  maxAge: process.env.NODE_ENV === 'production' ? '1d' : '0',
-  etag: true,
-  lastModified: true
-}));
+    if (!expectedChallenge) {
+      console.log('No expected challenge in session');
+      return res.status(400).json({ error: 'No active authentication session' });
+    }
 
-// API routes should be defined before the catch-all handler
-// (All API routes are already defined above)
+    if (!body || !body.id) {
+      console.log('Missing credential ID in request body');
+      return res.status(400).json({ error: 'Invalid authentication response - missing credential ID' });
+    }
 
-// Catch-all handler: send back React's index.html file for client-side routing
-// This should be AFTER all API routes
-app.get('*', (req, res) => {
-  // Skip serving index.html for API routes
-  if (req.path.startsWith('/auth/') || req.path.startsWith('/health')) {
-    return res.status(404).json({ error: 'API endpoint not found' });
+    // Extract user information from the userHandle in the passkey response
+    let userId, username;
+    
+    if (body.response && body.response.userHandle) {
+      try {
+        // Decode the userHandle to get user information
+        const userHandleBuffer = Buffer.from(body.response.userHandle, 'base64url');
+        const userHandleString = userHandleBuffer.toString('utf-8');
+        console.log('User handle decoded:', userHandleString);
+        
+        // For our implementation, we can use the userHandle as the user ID
+        // and create a username from it or use a default pattern
+        userId = userHandleString;
+        username = `user-${userId.substring(0, 8)}`; // Create a readable username
+        
+        console.log('Extracted user info - ID:', userId, 'Username:', username);
+      } catch (err) {
+        console.error('Error decoding userHandle:', err);
+        return res.status(400).json({ error: 'Invalid user handle in authentication response' });
+      }
+    } else {
+      console.log('No userHandle in authentication response');
+      return res.status(400).json({ error: 'Missing user handle in authentication response' });
+    }
+
+    // Create a minimal authenticator object for verification
+    // Since we don't have stored authenticators, we'll let the verification handle it
+    console.log('Attempting authentication without pre-stored user data');
+    console.log('Credential ID:', body.id);
+
+    // First try to find user by userHandle (preferred method)
+    console.log('Looking for user by userHandle...');
+    console.log('Available users:', Array.from(users.keys()));
+    console.log('Looking for userHandle:', userId);
+
+    let authenticator;
+    let user;
+
+    // Try to find user by userHandle first
+    for (const [storedUsername, userData] of users.entries()) {
+      if (userData.userHandleString === userId) {
+        console.log('Found user by userHandle:', storedUsername);
+        user = userData;
+        // Find the matching authenticator by credential ID
+        console.log(`User ${storedUsername} has ${userData.authenticators.length} authenticators`);
+        const foundAuth = userData.authenticators.find(auth => {
+          try {
+            if (!auth.credentialID) {
+              console.log('Authenticator has no credentialID, skipping');
+              return false;
+            }
+            
+            console.log('Comparing credential IDs:');
+            console.log('Stored:', Buffer.isBuffer(auth.credentialID) ? auth.credentialID.toString('base64url') : auth.credentialID);
+            console.log('Request:', body.id);
+            
+            const authCredentialBuffer = Buffer.isBuffer(auth.credentialID) 
+              ? auth.credentialID 
+              : Buffer.from(auth.credentialID, 'base64url');
+            const responseCredentialBuffer = Buffer.from(body.id, 'base64url');
+            
+            const matches = authCredentialBuffer.equals(responseCredentialBuffer);
+            console.log('Credential match result:', matches);
+            return matches;
+          } catch (err) {
+            console.log('Credential ID comparison error:', err);
+            return false;
+          }
+        });
+        
+        if (foundAuth) {
+          console.log('Found authenticator for user by userHandle');
+          authenticator = foundAuth;
+          break;
+        } else {
+          console.log('No matching authenticator found for this credential ID');
+        }
+      }
+    }
+
+    // If not found by userHandle, try by credential ID (fallback)
+    if (!authenticator && !user) {
+      console.log('User not found by userHandle, trying credential ID lookup...');
+      for (const [storedUsername, userData] of users.entries()) {
+        console.log(`Checking stored user ${storedUsername} with ${userData.authenticators.length} authenticators`);
+        
+        const foundAuth = userData.authenticators.find(auth => {
+          try {
+            if (!auth.credentialID) {
+              console.log('Authenticator has no credentialID, skipping');
+              return false;
+            }
+            
+            console.log('Stored credential ID:', auth.credentialID);
+            console.log('Request credential ID:', body.id);
+            
+            const authCredentialBuffer = Buffer.isBuffer(auth.credentialID) 
+              ? auth.credentialID 
+              : Buffer.from(auth.credentialID, 'base64url');
+            const responseCredentialBuffer = Buffer.from(body.id, 'base64url');
+            
+            const matches = authCredentialBuffer.equals(responseCredentialBuffer);
+            console.log('Credential ID matches:', matches);
+            return matches;
+          } catch (err) {
+            console.log('Credential ID comparison error:', err);
+            return false;
+          }
+        });
+        
+        if (foundAuth) {
+          console.log('Found matching stored authenticator for user:', storedUsername);
+          authenticator = foundAuth;
+          user = userData;
+          break;
+        }
+      }
+    }
+
+    if (authenticator && user) {
+      console.log('Using stored authenticator data for verification');
+      console.log('Authenticator details:', {
+        hasCredentialID: !!authenticator.credentialID,
+        hasCredentialPublicKey: !!authenticator.credentialPublicKey,
+        counter: authenticator.counter,
+        transports: authenticator.transports
+      });
+      
+      try {
+        // Try verification with stored authenticator data
+        const verification = await verifyAuthenticationResponse({
+          response: body,
+          expectedChallenge,
+          expectedOrigin: origin,
+          expectedRPID: rpID,
+          authenticator: {
+            credentialID: authenticator.credentialID,
+            credentialPublicKey: authenticator.credentialPublicKey,
+            counter: authenticator.counter || 0,
+            transports: authenticator.transports || [],
+          },
+          requireUserVerification: false,
+        });
+
+        if (verification.verified) {
+          console.log('Authentication successful using stored data');
+          
+          // Update counter
+          authenticator.counter = verification.authenticationInfo.newCounter;
+
+          // Create session
+          const sessionId = crypto.randomUUID();
+          const sessionData = {
+            userId: user.id,
+            username: user.username,
+            loginTime: new Date().toISOString(),
+            lastActivity: new Date().toISOString()
+          };
+
+          userSessions.set(sessionId, sessionData);
+          saveSessions(userSessions); // Persist to file
+          req.session.sessionId = sessionId;
+          req.session.userId = user.id;
+          req.session.username = user.username;
+
+          // Clear challenge
+          delete req.session.currentChallenge;
+          delete req.session.currentUser;
+
+          res.json({ 
+            verified: true, 
+            user: {
+              id: user.id,
+              username: user.username,
+              displayName: user.displayName
+            },
+            sessionId 
+          });
+        } else {
+          console.log('Authentication verification failed with stored data');
+          res.status(400).json({ error: 'Authentication verification failed', verified: false });
+        }
+      } catch (error) {
+        console.error('Authentication verification error with stored data:', error);
+        res.status(500).json({ error: 'Authentication verification failed' });
+      }
+    } else {
+      console.log('No stored authenticator found - this requires user registration first');
+      res.status(400).json({ 
+        error: 'Authenticator not found. Please register your passkey first.',
+        requireRegistration: true
+      });
+    }
+  } catch (error) {
+    console.error('Authentication verification error:', error);
+    res.status(500).json({ error: 'Authentication verification failed' });
   }
+});
+
+// Session Management Endpoints
+
+/**
+ * Get current user session info
+ */
+app.get('/api/auth/session', (req, res) => {
+  const sessionId = req.session.sessionId;
   
-  const indexPath = path.join(staticPath, 'index.html');
-  console.log(`🌐 Serving index.html for route: ${req.path}`);
-  res.sendFile(indexPath, (err) => {
-    if (err) {
-      console.error(`❌ Error serving index.html:`, err);
-      res.status(500).send('Error loading application');
+  if (!sessionId) {
+    return res.status(401).json({ error: 'No active session' });
+  }
+
+  const sessionData = userSessions.get(sessionId);
+  if (!sessionData) {
+    return res.status(401).json({ error: 'Invalid session' });
+  }
+
+  // Update last activity
+  sessionData.lastActivity = new Date().toISOString();
+  userSessions.set(sessionId, sessionData);
+
+  const user = users.get(sessionData.username);
+  if (!user) {
+    return res.status(401).json({ error: 'User not found' });
+  }
+
+  res.json({
+    user: {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName
+    },
+    session: {
+      loginTime: sessionData.loginTime,
+      lastActivity: sessionData.lastActivity
     }
   });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV,
-    sessions: deviceCodeSessions.size
+/**
+ * Logout and destroy session
+ */
+app.post('/api/auth/logout', (req, res) => {
+  const sessionId = req.session.sessionId;
+  
+  if (sessionId) {
+    userSessions.delete(sessionId);
+  }
+
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Session destruction error:', err);
+      return res.status(500).json({ error: 'Logout failed' });
+    }
+    
+    res.clearCookie('connect.sid');
+    res.json({ message: 'Logged out successfully' });
   });
 });
 
+// User Management Endpoints
+
 /**
- * Session metrics endpoint for monitoring concurrent users
+ * Get all registered users (for demo purposes)
  */
-app.get('/auth/metrics', (req, res) => {
-  const activeCount = sessionMetrics.getActiveSessionCount();
-  const totalSessions = deviceCodeSessions.size;
+app.get('/api/users', (req, res) => {
+  const userList = Array.from(users.values()).map(user => ({
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    authenticatorCount: user.authenticators.length,
+    createdAt: user.createdAt,
+    passkeys: user.authenticators.map((auth, index) => ({
+      id: Buffer.isBuffer(auth.credentialID) ? auth.credentialID.toString('base64url') : auth.credentialID,
+      counter: auth.counter || 0,
+      createdAt: auth.createdAt || new Date().toISOString(),
+      name: `Passkey ${index + 1}`,
+      transports: auth.transports || []
+    }))
+  }));
+
+  res.json(userList);
+});
+
+/**
+ * Get user by username
+ */
+app.get('/api/users/:username', (req, res) => {
+  const { username } = req.params;
+  const user = users.get(username);
+
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  res.json({
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    authenticatorCount: user.authenticators.length,
+    createdAt: user.createdAt
+  });
+});
+
+// Delete a specific passkey/authenticator for a user
+app.delete('/api/users/:username/passkeys/:credentialId', (req, res) => {
+  try {
+    const { username, credentialId } = req.params;
+    console.log(`Delete passkey request: username=${username}, credentialId=${credentialId}`);
+
+    const user = users.get(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const credentialBuffer = Buffer.from(credentialId, 'base64url');
+    const initialCount = user.authenticators.length;
+    
+    // Remove the authenticator with matching credential ID
+    user.authenticators = user.authenticators.filter(auth => {
+      try {
+        const authCredentialBuffer = Buffer.isBuffer(auth.credentialID) 
+          ? auth.credentialID 
+          : Buffer.from(auth.credentialID, 'base64url');
+        
+        return !authCredentialBuffer.equals(credentialBuffer);
+      } catch (error) {
+        console.warn('Error comparing credential IDs:', error);
+        return true; // Keep authenticator if comparison fails
+      }
+    });
+
+    const finalCount = user.authenticators.length;
+    const deleted = initialCount > finalCount;
+
+    if (deleted) {
+      // Update the user in storage
+      users.set(username, user);
+      saveUsers(users);
+      
+      console.log(`Successfully deleted passkey for user ${username}. Remaining: ${finalCount}`);
+      
+      res.json({ 
+        success: true, 
+        message: 'Passkey deleted successfully',
+        remainingPasskeys: finalCount
+      });
+    } else {
+      res.status(404).json({ error: 'Passkey not found' });
+    }
+  } catch (error) {
+    console.error('Error deleting passkey:', error);
+    res.status(500).json({ error: 'Failed to delete passkey' });
+  }
+});
+
+// Delete all passkeys for a user
+app.delete('/api/users/:username/passkeys', (req, res) => {
+  try {
+    const { username } = req.params;
+    console.log(`Delete all passkeys request: username=${username}`);
+
+    const user = users.get(username);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const deletedCount = user.authenticators.length;
+    user.authenticators = [];
+    
+    // Update the user in storage
+    users.set(username, user);
+    saveUsers(users);
+    
+    console.log(`Successfully deleted ${deletedCount} passkeys for user ${username}`);
+    
+    res.json({ 
+      success: true, 
+      message: `Deleted ${deletedCount} passkeys successfully`,
+      deletedCount: deletedCount
+    });
+  } catch (error) {
+    console.error('Error deleting all passkeys:', error);
+    res.status(500).json({ error: 'Failed to delete passkeys' });
+  }
+});
+
+// Protected API endpoints (require authentication)
+const requireAuth = (req, res, next) => {
+  const sessionId = req.session.sessionId;
+  
+  if (!sessionId || !userSessions.has(sessionId)) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  const sessionData = userSessions.get(sessionId);
+  sessionData.lastActivity = new Date().toISOString();
+  userSessions.set(sessionId, sessionData);
+
+  req.user = sessionData;
+  next();
+};
+
+/**
+ * Protected endpoint example
+ */
+app.get('/api/protected/profile', requireAuth, (req, res) => {
+  const user = users.get(req.user.username);
   
   res.json({
-    concurrent_users: activeCount,
-    total_sessions: sessionMetrics.totalSessions,
-    active_sessions: activeCount,
-    stored_sessions: totalSessions,
-    completed_sessions: sessionMetrics.completedSessions,
-    failed_sessions: sessionMetrics.failedSessions,
-    timestamp: new Date().toISOString()
+    message: 'This is a protected endpoint',
+    user: {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      createdAt: user.createdAt
+    },
+    session: req.user
   });
+});
+
+// Serve React app for all other routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
 // Error handling middleware
 app.use((error, req, res, next) => {
-  console.error('[SERVER ERROR]', error);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? error.message : undefined
-  });
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
-// Azure App Service and iisnode compatibility
-if (process.env.WEBSITE_NODE_DEFAULT_VERSION) {
-  console.log(`🚀 Secure Kiosk Server ready for Azure App Service (iisnode)`);
-  console.log(`🔒 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🛡️  Security features enabled: Helmet, Rate Limiting (CORS handled by Azure App Service)`);
-  console.log(`🌐 Website Site Name: ${process.env.WEBSITE_SITE_NAME || 'Unknown'}`);
-  console.log(`📍 Website Resource Group: ${process.env.WEBSITE_RESOURCE_GROUP || 'Unknown'}`);
-  
-  // Configure trust proxy for Azure load balancer
-  app.set('trust proxy', 1);
-  console.log(`🔗 Trust proxy configured for Azure load balancer`);
-  
-  // Handle Azure App Service shutdown signals
-  process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received in Azure App Service, shutting down gracefully');
-    // Clean up device code sessions
-    deviceCodeSessions.clear();
-    console.log('✅ Cleanup completed');
-  });
-  
-} else if (!module.parent) {
-  // Local development - start the server normally
-  app.listen(PORT, async () => {
-    console.log(`🚀 Secure Kiosk Server running on port ${PORT}`);
-    console.log(`🔒 Environment: ${process.env.NODE_ENV}`);
-    console.log(`🛡️  Security features enabled: Helmet, Rate Limiting, CORS (local dev)`);
-    
-    // Load persisted sessions on startup
-    await loadSessions();
-    
-    console.log(`🌐 Application URL: http://localhost:${PORT}`);
-    console.log(`� API endpoints: http://localhost:${PORT}/auth/*`);
-    console.log(`� Health check: http://localhost:${PORT}/health`);
-    
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`💡 For development with hot-reload: npm run dev:watch`);
+// Clean up old sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+
+  for (const [sessionId, sessionData] of userSessions.entries()) {
+    const lastActivity = new Date(sessionData.lastActivity).getTime();
+    if (now - lastActivity > maxAge) {
+      userSessions.delete(sessionId);
+      console.log(`Cleaned up expired session: ${sessionId}`);
     }
-  });
-}
+  }
+}, 60 * 60 * 1000); // Run every hour
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`📱 WebAuthn RP ID: ${rpID}`);
+  console.log(`🌐 Origin: ${origin}`);
+  console.log(`🔒 Session secret: ${process.env.SESSION_SECRET ? 'Configured' : 'Generated (use SESSION_SECRET env var in production)'}`);
+});
 
 module.exports = app;

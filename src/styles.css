@@ -10,9 +10,10 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #f5f5f5;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: #333;
   line-height: 1.6;
+  min-height: 100vh;
 }
 
 .app {
@@ -436,4 +437,457 @@ body {
     padding: 0.8rem 1.5rem;
     font-size: 1rem;
   }
+}
+
+/* Enterprise and Entra ID Styles */
+.auth-methods {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.auth-method-card {
+  background: white;
+  border-radius: 12px;
+  padding: 2rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  border: 2px solid transparent;
+  transition: all 0.3s ease;
+}
+
+.auth-method-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 15px rgba(0, 0, 0, 0.15);
+}
+
+.auth-method-card.enterprise {
+  border-color: #0078d4;
+  background: linear-gradient(135deg, #ffffff 0%, #f8f9ff 100%);
+}
+
+.auth-method-card h3 {
+  margin-bottom: 1rem;
+  color: #333;
+  font-size: 1.3rem;
+}
+
+.auth-method-card.enterprise h3 {
+  color: #0078d4;
+}
+
+.auth-method-card p {
+  margin-bottom: 1.5rem;
+  color: #666;
+  line-height: 1.5;
+}
+
+.button-primary.enterprise {
+  background: linear-gradient(135deg, #0078d4 0%, #106ebe 100%);
+  border: none;
+  color: white;
+  font-weight: 600;
+}
+
+.button-primary.enterprise:hover {
+  background: linear-gradient(135deg, #106ebe 0%, #005a9e 100%);
+  transform: translateY(-1px);
+}
+
+.enterprise-info {
+  background: #f0f6ff;
+  border: 1px solid #cce4ff;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.enterprise-info p {
+  margin-bottom: 0.5rem;
+}
+
+.enterprise-info p:last-child {
+  margin-bottom: 0;
+  font-style: italic;
+  color: #0078d4;
+}
+
+.entra-success {
+  max-width: 600px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.user-info-card {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.user-info-card p {
+  margin-bottom: 0.5rem;
+  text-align: left;
+}
+
+.next-steps {
+  background: #f8f9ff;
+  border: 2px solid #e1e8ff;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+}
+
+.next-steps h3 {
+  color: #0078d4;
+  margin-bottom: 1rem;
+}
+
+.webauthn-support {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.webauthn-support span {
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.webauthn-support .supported {
+  background: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.webauthn-support .unsupported {
+  background: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+}
+
+.enterprise-badge {
+  background: linear-gradient(135deg, #0078d4 0%, #106ebe 100%);
+  color: white;
+  padding: 0.2rem 0.5rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-top: 0.5rem;
+  display: inline-block;
+}
+
+.dashboard {
+  display: grid;
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.stats-card {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.stats-card h3 {
+  color: #28a745;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.stats-card p {
+  margin-bottom: 0.5rem;
+  color: #555;
+}
+
+.protected-content {
+  background: linear-gradient(135deg, #f8f9ff 0%, #ffffff 100%);
+  border: 2px solid #e1e8ff;
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+
+.protected-content h3 {
+  color: #0078d4;
+  margin-bottom: 1rem;
+}
+
+.registration-info {
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.registration-info h4 {
+  color: #495057;
+  margin-bottom: 0.75rem;
+}
+
+.registration-info ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.registration-info li {
+  padding: 0.25rem 0;
+  color: #6c757d;
+}
+
+.registration-info li strong {
+  color: #495057;
+}
+
+.container {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  margin: 2rem;
+  padding: 2rem;
+  min-height: calc(100vh - 4rem);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 2px solid #e9ecef;
+}
+
+.header h1 {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.error-container {
+  text-align: center;
+  padding: 3rem;
+  background: white;
+  border-radius: 16px;
+  margin: 2rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  font-size: 1.5rem;
+  color: white;
+}
+
+/* User Management Styles */
+.users-section {
+  margin-top: 2rem;
+}
+
+.users-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.user-card {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  transition: box-shadow 0.2s ease;
+}
+
+.user-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.user-info {
+  flex: 1;
+}
+
+.user-info strong {
+  display: block;
+  font-size: 1.1rem;
+  color: #2c3e50;
+  margin-bottom: 0.25rem;
+}
+
+.user-info small {
+  display: block;
+  color: #6c757d;
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+}
+
+.passkey-count {
+  background: #007bff;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: inline-block;
+}
+
+.enterprise-badge {
+  background: #28a745;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-left: 0.5rem;
+  display: inline-block;
+}
+
+.user-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-left: 1rem;
+}
+
+.delete-btn {
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.delete-btn:hover {
+  background: #c82333;
+  transform: translateY(-1px);
+}
+
+.delete-btn:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* User Card Wrapper and Expansion */
+.user-card-wrapper {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.user-badges {
+  margin-top: 0.5rem;
+}
+
+.expand-btn {
+  background: #17a2b8;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  margin-right: 0.5rem;
+}
+
+.expand-btn:hover {
+  background: #138496;
+  transform: translateY(-1px);
+}
+
+/* Individual Passkeys */
+.passkeys-list {
+  background: #ffffff;
+  border-top: 1px solid #e9ecef;
+  padding: 1rem;
+}
+
+.passkeys-list h4 {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.9rem;
+  color: #495057;
+  font-weight: 600;
+}
+
+.passkey-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.passkey-item:last-child {
+  margin-bottom: 0;
+}
+
+.passkey-info {
+  flex: 1;
+}
+
+.passkey-name {
+  display: block;
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: #495057;
+  margin-bottom: 0.25rem;
+}
+
+.passkey-info small {
+  display: block;
+  color: #6c757d;
+  font-size: 0.75rem;
+}
+
+.delete-passkey-btn {
+  background: #dc3545;
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.delete-passkey-btn:hover {
+  background: #c82333;
+  transform: scale(1.05);
+}
+
+.delete-passkey-btn:disabled {
+  background: #6c757d;
+  cursor: not-allowed;
+  transform: none;
 }
